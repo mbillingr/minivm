@@ -152,3 +152,13 @@ impl From<bool> for PrimitiveValue {
         }
     }
 }
+
+impl From<PrimitiveValue> for usize {
+    fn from(x: PrimitiveValue) -> Self {
+        match x {
+            PrimitiveValue::Integer(i) if i >= 0 => i as usize,
+            PrimitiveValue::Integer(i) if i < 0 => panic!("Value error: expected positive integer"),
+            _ => panic!("Type Error"),
+        }
+    }
+}

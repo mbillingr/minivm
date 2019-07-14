@@ -18,31 +18,53 @@ pub enum Op {
 
     Inc(Register),
     Dec(Register),
-    Add(Register, Register, Register),
-    Sub(Register, Register, Register),
-    Mul(Register, Register, Register),
-    Div(Register, Register, Register, Register),
+    Add(Register, Register, Operand<PrimitiveValue>),
+    Sub(Register, Register, Operand<PrimitiveValue>),
+    Mul(Register, Register, Operand<PrimitiveValue>),
+    Div(
+        Register,
+        Register,
+        Operand<PrimitiveValue>,
+        Operand<PrimitiveValue>,
+    ),
 
-    Equal(Register, Register, Register),
-    Uneq(Register, Register, Register),
-    Less(Register, Register, Register),
-    LessEq(Register, Register, Register),
+    Equal(Register, Register, Operand<PrimitiveValue>),
+    Uneq(Register, Register, Operand<PrimitiveValue>),
+    Less(Register, Operand<PrimitiveValue>, Operand<PrimitiveValue>),
+    LessEq(Register, Operand<PrimitiveValue>, Operand<PrimitiveValue>),
     Not(Register, Register),
 
-    Jmp(i8),
-    JmpCond(i8, Register),
+    Jmp(Operand<i8>),
     JmpFar(&'static [Op]),
-    JmpDyn(Register),
+    JmpCond(Operand<i8>, Register),
 
     Alloc(Register, usize),
-    GetRec(Register, Register, usize),
-    GetRecDyn(Register, Register, Register),
-    SetRec(Register, usize, Register),
-    SetRecDyn(Register, Register, Register),
+    GetRec(Register, Register, Operand<usize>),
+    SetRec(Register, Operand<usize>, Operand<PrimitiveValue>),
 
-    Cons(Register, Register, Register),
+    Cons(Register, Operand<PrimitiveValue>, Operand<PrimitiveValue>),
     Car(Register, Register),
     Cdr(Register, Register),
+}
+
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub enum Operand<T> {
+    R(Register),
+    I(T),
+}
+
+impl<T> Operand<T>
+where
+    PrimitiveValue: Into<T>,
+    T: std::fmt::Debug,
+    T: Copy,
+{
+    fn eval(&self, registers: &[PrimitiveValue]) -> T {
+        match self {
+            Operand::R(r) => registers[*r as usize].into(),
+            Operand::I(i) => *i,
+        }
+    }
 }
 
 pub fn run(mut code: &[Op], storage: &RecordStorage) -> PrimitiveValue {
@@ -79,47 +101,59 @@ pub fn run(mut code: &[Op], storage: &RecordStorage) -> PrimitiveValue {
                 pc += 1;
             }
             Op::Add(r, a, b) => {
-                register[r as usize] = register[a as usize].add(register[b as usize]);
+                register[r as usize] = register[a as usize].add(b.eval(&register));
                 pc += 1;
             }
             Op::Sub(r, a, b) => {
-                register[r as usize] = register[a as usize].sub(register[b as usize]);
+                register[r as usize] = register[a as usize].sub(b.eval(&register));
                 pc += 1;
             }
             Op::Mul(r, a, b) => {
-                register[r as usize] = register[a as usize].mul(register[b as usize]);
+                register[r as usize] = register[a as usize].mul(b.eval(&register));
                 pc += 1;
             }
             Op::Div(r, s, a, b) => {
-                let (quot, rem) = register[a as usize].div(register[b as usize]);
+                let (quot, rem) = a.eval(&register).div(b.eval(&register));
                 register[r as usize] = quot;
                 register[s as usize] = rem;
                 pc += 1;
             }
             Op::Equal(r, a, b) => {
-                register[r as usize] = register[a as usize].ptr_equal(register[b as usize]);
+                register[r as usize] = register[a as usize].ptr_equal(b.eval(&register));
                 pc += 1;
             }
             Op::Uneq(r, a, b) => {
-                register[r as usize] = (register[a as usize].ptr_equal(register[b as usize])).not();
+                register[r as usize] = register[a as usize].ptr_equal(b.eval(&register)).not();
                 pc += 1;
             }
             Op::Less(r, a, b) => {
-                register[r as usize] = register[a as usize].less(register[b as usize]);
+                register[r as usize] = a.eval(&register).less(b.eval(&register));
                 pc += 1;
             }
             Op::LessEq(r, a, b) => {
-                register[r as usize] = register[a as usize].less_eq(register[b as usize]);
+                register[r as usize] = a.eval(&register).less_eq(b.eval(&register));
                 pc += 1;
             }
             Op::Not(dst, src) => {
                 register[dst as usize] = register[src as usize].not();
                 pc += 1;
             }
-            Op::Jmp(relative) => pc = (pc as isize + relative as isize) as usize,
-            Op::JmpCond(relative, r) => {
-                if register[r as usize].as_bool() {
-                    pc = (pc as isize + relative as isize) as usize;
+            Op::Jmp(op) => match op {
+                Operand::R(r) => {
+                    code = register[r as usize].as_codeblock();
+                    pc = 0;
+                }
+                Operand::I(relative) => pc = (pc as isize + relative as isize) as usize,
+            },
+            Op::JmpCond(op, c) => {
+                if register[c as usize].as_bool() {
+                    match op {
+                        Operand::R(r) => {
+                            code = register[r as usize].as_codeblock();
+                            pc = 0;
+                        }
+                        Operand::I(relative) => pc = (pc as isize + relative as isize) as usize,
+                    }
                 } else {
                     pc += 1;
                 }
@@ -128,42 +162,40 @@ pub fn run(mut code: &[Op], storage: &RecordStorage) -> PrimitiveValue {
                 code = target;
                 pc = 0;
             }
-            Op::JmpDyn(r) => {
-                code = register[r as usize].as_codeblock();
-                pc = 0;
-            }
             Op::Alloc(r, size) => {
                 let rec = storage.allocate_record(size, &mut register);
                 register[r as usize] = PrimitiveValue::Record(rec);
                 pc += 1;
             }
-            Op::GetRec(dst, r, idx) => {
+            Op::GetRec(dst, r, i) => {
                 let rec = register[r as usize].as_record();
+                let idx = i.eval(&register);
                 register[dst as usize] = storage.get_record(rec)[idx];
                 pc += 1;
             }
-            Op::GetRecDyn(dst, r, i) => {
+            /*Op::GetRecDyn(dst, r, i) => {
                 let rec = register[r as usize].as_record();
                 let idx = register[i as usize].as_int() as usize;
                 register[dst as usize] = storage.get_record(rec)[idx];
                 pc += 1;
-            }
-            Op::SetRec(r, idx, src) => {
+            }*/
+            Op::SetRec(r, i, v) => {
                 let rec = register[r as usize].as_record();
-                let value = register[src as usize];
+                let idx = i.eval(&register);
+                let value = v.eval(&register);
                 storage.set_element(rec, idx, value);
                 pc += 1;
             }
-            Op::SetRecDyn(r, i, v) => {
+            /*Op::SetRecDyn(r, i, v) => {
                 let rec = register[r as usize].as_record();
                 let idx = register[i as usize].as_int() as usize;
                 storage.set_element(rec, idx, register[v as usize]);
                 pc += 1;
-            }
+            }*/
             Op::Cons(dst, car, cdr) => {
                 let rec = storage.allocate_record(2, &mut register);
-                storage.set_element(rec, 0, register[car as usize]);
-                storage.set_element(rec, 1, register[cdr as usize]);
+                storage.set_element(rec, 0, car.eval(&register));
+                storage.set_element(rec, 1, cdr.eval(&register));
                 register[dst as usize] = PrimitiveValue::Pair(rec.into());
                 pc += 1;
             }
@@ -185,6 +217,7 @@ pub fn run(mut code: &[Op], storage: &RecordStorage) -> PrimitiveValue {
 mod tests {
     use super::*;
     use crate::memory::store_code_block;
+    use Operand::*;
 
     #[derive(Debug, PartialEq)]
     enum TestResult {
@@ -254,10 +287,7 @@ mod tests {
 
     #[test]
     fn constant() {
-        run_test(
-            &[Op::Const(0, PrimitiveValue::Integer(42)), Op::Term],
-            42
-        )
+        run_test(&[Op::Const(0, PrimitiveValue::Integer(42)), Op::Term], 42)
     }
 
     #[test]
@@ -268,7 +298,7 @@ mod tests {
             Op::Inc(0),
             Op::Inc(1),
             Op::Inc(0),
-            Op::Cons(0, 0, 1),
+            Op::Cons(0, R(0), R(1)),
             Op::Term,
         ];
         run_test(&code, vec![2, 1]);
@@ -282,10 +312,10 @@ mod tests {
                 Op::Const(0, PrimitiveValue::Integer(1)),
                 Op::Const(1, PrimitiveValue::Integer(2)),
                 Op::Copy(0, 1),
-                Op::Cons(0, 0, 1),
+                Op::Cons(0, R(0), R(1)),
                 Op::Term,
             ],
-            vec![2, 2]
+            vec![2, 2],
         )
     }
 
@@ -296,10 +326,10 @@ mod tests {
                 Op::Const(0, PrimitiveValue::Integer(1)),
                 Op::Const(1, PrimitiveValue::Integer(2)),
                 Op::Swap(0, 1),
-                Op::Cons(0, 0, 1),
+                Op::Cons(0, R(0), R(1)),
                 Op::Term,
             ],
-            vec![2, 1]
+            vec![2, 1],
         );
     }
 
@@ -311,7 +341,7 @@ mod tests {
                 Op::Inc(0),
                 Op::Term,
             ],
-            2
+            2,
         )
     }
 
@@ -323,7 +353,7 @@ mod tests {
                 Op::Dec(0),
                 Op::Term,
             ],
-            -1
+            -1,
         )
     }
 
@@ -333,7 +363,7 @@ mod tests {
             &[
                 Op::Const(1, PrimitiveValue::Integer(10)),
                 Op::Const(2, PrimitiveValue::Integer(20)),
-                Op::Add(0, 1, 2),
+                Op::Add(0, 1, R(2)),
                 Op::Term,
             ],
             30,
@@ -346,10 +376,10 @@ mod tests {
             &[
                 Op::Const(1, PrimitiveValue::Integer(10)),
                 Op::Const(2, PrimitiveValue::Integer(20)),
-                Op::Sub(0, 1, 2),
+                Op::Sub(0, 1, R(2)),
                 Op::Term,
             ],
-            -10
+            -10,
         )
     }
 
@@ -359,10 +389,10 @@ mod tests {
             &[
                 Op::Const(1, PrimitiveValue::Integer(10)),
                 Op::Const(2, PrimitiveValue::Integer(20)),
-                Op::Mul(0, 1, 2),
+                Op::Mul(0, 1, R(2)),
                 Op::Term,
             ],
-            200
+            200,
         )
     }
 
@@ -372,11 +402,11 @@ mod tests {
             &[
                 Op::Const(1, PrimitiveValue::Integer(50)),
                 Op::Const(2, PrimitiveValue::Integer(20)),
-                Op::Div(0, 1, 1, 2),
-                Op::Cons(0, 0, 1),
+                Op::Div(0, 1, R(1), R(2)),
+                Op::Cons(0, R(0), R(1)),
                 Op::Term,
             ],
-            vec![2, 10]
+            vec![2, 10],
         )
     }
 
@@ -386,11 +416,11 @@ mod tests {
             &[
                 Op::Const(0, PrimitiveValue::Integer(0)),
                 Op::Inc(0),
-                Op::Jmp(4),
+                Op::Jmp(I(4)),
                 Op::Inc(0),
-                Op::Jmp(3),
+                Op::Jmp(I(3)),
                 Op::Inc(0),
-                Op::Jmp(-3),
+                Op::Jmp(I(-3)),
                 Op::Term,
             ],
             2,
@@ -399,10 +429,7 @@ mod tests {
 
     #[test]
     fn jump_far() {
-        let func = store_code_block(vec![
-            Op::Inc(0),
-            Op::Term,
-        ]);
+        let func = store_code_block(vec![Op::Inc(0), Op::Term]);
         let code = vec![
             Op::Const(0, PrimitiveValue::Integer(10)),
             Op::JmpFar(func),
@@ -422,7 +449,7 @@ mod tests {
         let code = vec![
             Op::Const(0, PrimitiveValue::Integer(10)),
             Op::Const(1, PrimitiveValue::CodeBlock(func)),
-            Op::JmpDyn(1),
+            Op::Jmp(R(1)),
             Op::Term,
         ];
 
@@ -432,11 +459,8 @@ mod tests {
     #[test]
     fn record_allocation() {
         run_test(
-            &[
-                Op::Alloc(0, 1234),
-                Op::Term,
-            ],
-            vec![PrimitiveValue::Undefined; 1234]
+            &[Op::Alloc(0, 1234), Op::Term],
+            vec![PrimitiveValue::Undefined; 1234],
         )
     }
 
@@ -445,17 +469,13 @@ mod tests {
         run_test(
             &[
                 Op::Alloc(0, 3),
-                Op::Const(1, PrimitiveValue::Integer(3)),
-                Op::SetRec(0, 0, 1),
-                Op::Const(1, PrimitiveValue::Integer(42)),
-                Op::SetRec(0, 1, 1),
-                Op::Const(1, PrimitiveValue::Integer(5)),
-                Op::SetRec(0, 1, 1),
-                Op::Const(1, PrimitiveValue::Integer(7)),
-                Op::SetRec(0, 2, 1),
+                Op::SetRec(0, I(0), I(PrimitiveValue::Integer(3))),
+                Op::SetRec(0, I(1), I(PrimitiveValue::Integer(42))),
+                Op::SetRec(0, I(1), I(PrimitiveValue::Integer(5))),
+                Op::SetRec(0, I(2), I(PrimitiveValue::Integer(7))),
                 Op::Term,
             ],
-            vec![3, 5, 7]
+            vec![3, 5, 7],
         )
     }
 
@@ -466,18 +486,18 @@ mod tests {
                 Op::Const(1, PrimitiveValue::Integer(0)),
                 Op::Const(2, PrimitiveValue::Integer(100)),
                 Op::Alloc(0, 3),
-                Op::SetRecDyn(0, 1, 2),
+                Op::SetRec(0, R(1), R(2)),
                 Op::Inc(1),
                 Op::Dec(2),
-                Op::SetRecDyn(0, 1, 2),
+                Op::SetRec(0, R(1), I(PrimitiveValue::Integer(99))),
                 Op::Inc(1),
                 Op::Dec(2),
-                Op::SetRecDyn(0, 1, 2),
+                Op::SetRec(0, I(2), R(2)),
                 Op::Inc(1),
                 Op::Dec(2),
                 Op::Term,
             ],
-            vec![100, 99, 98]
+            vec![100, 99, 98],
         )
     }
 
@@ -486,18 +506,14 @@ mod tests {
         run_test(
             &[
                 Op::Alloc(1, 3),
-                Op::Const(2, PrimitiveValue::Integer(3)),
-                Op::SetRec(1, 0, 2),
-                Op::Const(2, PrimitiveValue::Integer(42)),
-                Op::SetRec(1, 1, 2),
-                Op::Const(2, PrimitiveValue::Integer(5)),
-                Op::SetRec(1, 1, 2),
-                Op::Const(2, PrimitiveValue::Integer(7)),
-                Op::SetRec(1, 2, 2),
-                Op::GetRec(0, 1, 2),
+                Op::SetRec(1, I(0), I(PrimitiveValue::Integer(3))),
+                Op::SetRec(1, I(1), I(PrimitiveValue::Integer(42))),
+                Op::SetRec(1, I(1), I(PrimitiveValue::Integer(5))),
+                Op::SetRec(1, I(2), I(PrimitiveValue::Integer(7))),
+                Op::GetRec(0, 1, I(2)),
                 Op::Term,
             ],
-            7
+            7,
         )
     }
 
@@ -506,19 +522,15 @@ mod tests {
         run_test(
             &[
                 Op::Alloc(1, 3),
-                Op::Const(2, PrimitiveValue::Integer(3)),
-                Op::SetRec(1, 0, 2),
-                Op::Const(2, PrimitiveValue::Integer(42)),
-                Op::SetRec(1, 1, 2),
-                Op::Const(2, PrimitiveValue::Integer(5)),
-                Op::SetRec(1, 1, 2),
-                Op::Const(2, PrimitiveValue::Integer(7)),
-                Op::SetRec(1, 2, 2),
+                Op::SetRec(1, I(0), I(PrimitiveValue::Integer(3))),
+                Op::SetRec(1, I(1), I(PrimitiveValue::Integer(42))),
+                Op::SetRec(1, I(1), I(PrimitiveValue::Integer(5))),
+                Op::SetRec(1, I(2), I(PrimitiveValue::Integer(7))),
                 Op::Const(2, PrimitiveValue::Integer(1)),
-                Op::GetRecDyn(0, 1, 2),
+                Op::GetRec(0, 1, R(2)),
                 Op::Term,
             ],
-            5
+            5,
         )
     }
 
@@ -526,16 +538,14 @@ mod tests {
     fn cons() {
         run_test(
             &[
-                Op::Const(2, PrimitiveValue::Nil),
                 Op::Const(1, PrimitiveValue::Integer(1)),
-                Op::Cons(0, 1, 2),
-                Op::Const(1, PrimitiveValue::Integer(2)),
-                Op::Cons(0, 1, 0),
+                Op::Cons(0, R(1), I(PrimitiveValue::Nil)),
+                Op::Cons(0, I(PrimitiveValue::Integer(2)), R(0)),
                 Op::Const(1, PrimitiveValue::Integer(3)),
-                Op::Cons(0, 1, 0),
+                Op::Cons(0, R(1), R(0)),
                 Op::Term,
             ],
-            (3, (2, (1, PrimitiveValue::Nil)))
+            (3, (2, (1, PrimitiveValue::Nil))),
         )
     }
 
@@ -545,11 +555,11 @@ mod tests {
             &[
                 Op::Const(2, PrimitiveValue::Integer(2)),
                 Op::Const(1, PrimitiveValue::Integer(1)),
-                Op::Cons(0, 1, 2),
+                Op::Cons(0, R(1), R(2)),
                 Op::Car(0, 0),
                 Op::Term,
             ],
-            1
+            1,
         )
     }
 
@@ -559,17 +569,17 @@ mod tests {
             &[
                 Op::Const(2, PrimitiveValue::Integer(2)),
                 Op::Const(1, PrimitiveValue::Integer(1)),
-                Op::Cons(0, 1, 2),
+                Op::Cons(0, R(1), R(2)),
                 Op::Cdr(0, 0),
                 Op::Term,
             ],
-            2
+            2,
         )
     }
 
     #[test]
     fn factorial() {
-        // Implement the following Scheme program in bytecode:
+        // Implementation of the following continuation passing style program in bytecode:
         // (define (factorial n k)
         //   (if (= n 0)
         //       (k 1)
@@ -584,45 +594,41 @@ mod tests {
 
         let accumulate = store_code_block(vec![
             // lambda (r1: f, r2: [self-fn, n, k]
-            Op::GetRec(3, 2, 1),  // put n in r3
-            Op::GetRec(2, 2, 2),  // put k in r2
-            Op::GetRec(0, 2, 0),  // put k's code in r0
-            Op::Mul(1, 1, 3),     // put n * f in r1
-            Op::JmpDyn(0),        // call k with multiplication result in r1 and closure in r2
+            Op::GetRec(3, 2, I(1)), // put n in r3
+            Op::GetRec(2, 2, I(2)), // put k in r2
+            Op::GetRec(0, 2, I(0)), // put k's code in r0
+            Op::Mul(1, 1, R(3)),    // put n * f in r1
+            Op::Jmp(R(0)),          // call k with multiplication result in r1 and closure in r2
         ]);
 
-        let fact = store_code_block( vec![
-            Op::Const(7, PrimitiveValue::Integer(0)),   // constant 0
-
+        let fact = store_code_block(vec![
             // if n == 0
-            Op::Uneq(0, 1, 7),
-            Op::JmpCond(4, 0),
+            Op::Uneq(0, 1, I(0.into())),
+            Op::JmpCond(I(4), 0),
             // then k(1)
             Op::Const(1, PrimitiveValue::Integer(1)),
-            Op::GetRec(0, 2, 0),  // put k's code in r0
-            Op::JmpDyn(0),        // call k with 1 in r1 and closure in r2
+            Op::GetRec(0, 2, I(0)), // put k's code in r0
+            Op::Jmp(R(0)),          // call k with 1 in r1 and closure in r2
             // else
-            Op::Alloc(4, 3),                                      // allocate closure
-            Op::Const(3, PrimitiveValue::CodeBlock(accumulate)),
-            Op::SetRec(4, 0, 3),                                  // closure function
-            Op::SetRec(4, 1, 1),                                  // n
-            Op::SetRec(4, 2, 2),                                  // k
-            Op::Copy(2, 4),                                       // put closure in r2 as the new continuation of the recursive call to fact
-            Op::Dec(1),                                           // n -= 1
-            Op::Jmp(-12),                                         // call fact(n-1, accumulate)
+            Op::Alloc(4, 3), // allocate closure
+            Op::SetRec(4, I(0), I(PrimitiveValue::CodeBlock(accumulate))), // closure function
+            Op::SetRec(4, I(1), R(1)), // n
+            Op::SetRec(4, I(2), R(2)), // k
+            Op::Copy(2, 4), // put closure in r2 as the new continuation of the recursive call to fact
+            Op::Dec(1),     // n -= 1
+            Op::Jmp(I(-11)), // call fact(n-1, accumulate)
         ]);
 
         let final_continuation = store_code_block(vec![Op::Copy(0, 1), Op::Term]);
 
         run_test(
             &[
-                Op::Const(1, PrimitiveValue::Integer(0)),                    // initial n
-                Op::Alloc(2, 1),                                             // allocate closure with no variables
-                Op::Const(3, PrimitiveValue::CodeBlock(final_continuation)),
-                Op::SetRec(2, 0, 3),                                         // put code in closure
-                Op::JmpFar(fact),                                            // call fact(n=0, final_continuation)
+                Op::Const(1, PrimitiveValue::Integer(0)), // initial n
+                Op::Alloc(2, 1),                          // allocate closure with no variables
+                Op::SetRec(2, I(0), I(PrimitiveValue::CodeBlock(final_continuation))), // put code in closure
+                Op::JmpFar(fact), // call fact(n=0, final_continuation)
             ],
-            1
+            1,
         );
 
         run_test(
@@ -630,11 +636,10 @@ mod tests {
                 // fact(1, final_continuation)
                 Op::Const(1, PrimitiveValue::Integer(1)),
                 Op::Alloc(2, 1),
-                Op::Const(3, PrimitiveValue::CodeBlock(final_continuation)),
-                Op::SetRec(2, 0, 3),
+                Op::SetRec(2, I(0), I(PrimitiveValue::CodeBlock(final_continuation))),
                 Op::JmpFar(fact),
             ],
-            1
+            1,
         );
 
         run_test(
@@ -642,11 +647,10 @@ mod tests {
                 // fact(2, final_continuation)
                 Op::Const(1, PrimitiveValue::Integer(2)),
                 Op::Alloc(2, 1),
-                Op::Const(3, PrimitiveValue::CodeBlock(final_continuation)),
-                Op::SetRec(2, 0, 3),
+                Op::SetRec(2, I(0), I(PrimitiveValue::CodeBlock(final_continuation))),
                 Op::JmpFar(fact),
             ],
-            2
+            2,
         );
 
         run_test(
@@ -654,11 +658,10 @@ mod tests {
                 // fact(3, final_continuation)
                 Op::Const(1, PrimitiveValue::Integer(3)),
                 Op::Alloc(2, 1),
-                Op::Const(3, PrimitiveValue::CodeBlock(final_continuation)),
-                Op::SetRec(2, 0, 3),
+                Op::SetRec(2, I(0), I(PrimitiveValue::CodeBlock(final_continuation))),
                 Op::JmpFar(fact),
             ],
-            6
+            6,
         );
 
         run_test(
@@ -666,11 +669,10 @@ mod tests {
                 // fact(5, final_continuation)
                 Op::Const(1, PrimitiveValue::Integer(5)),
                 Op::Alloc(2, 1),
-                Op::Const(3, PrimitiveValue::CodeBlock(final_continuation)),
-                Op::SetRec(2, 0, 3),
+                Op::SetRec(2, I(0), I(PrimitiveValue::CodeBlock(final_continuation))),
                 Op::JmpFar(fact),
             ],
-            120
+            120,
         );
 
         run_test(
@@ -678,11 +680,10 @@ mod tests {
                 // fact(10, final_continuation)
                 Op::Const(1, PrimitiveValue::Integer(10)),
                 Op::Alloc(2, 1),
-                Op::Const(3, PrimitiveValue::CodeBlock(final_continuation)),
-                Op::SetRec(2, 0, 3),
+                Op::SetRec(2, I(0), I(PrimitiveValue::CodeBlock(final_continuation))),
                 Op::JmpFar(fact),
             ],
-            3628800
+            3628800,
         );
     }
 }
