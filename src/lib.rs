@@ -1,5 +1,6 @@
 pub mod memory;
 pub mod primitive_value;
+pub mod test_utils;
 pub mod virtual_machine;
 
 #[cfg(test)]
