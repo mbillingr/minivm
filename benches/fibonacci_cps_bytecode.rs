@@ -74,7 +74,7 @@ fn bench_fib(c: &mut Criterion) {
     let code = fibonacci(15);
     let storage = RecordStorage::new(0);
 
-    c.bench_function("fib_bytecode 15", move |b| {
+    c.bench_function("fib_cps_bytecode 15", move |b| {
         b.iter(|| run(black_box(code), &storage))
     });
 }

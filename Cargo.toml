@@ -14,5 +14,8 @@ name = "fibonacci_native"
 harness = false
 
 [[bench]]
-name = "fibonacci_bytecode"
+name = "fibonacci_cps_bytecode"
+harness = false
+[[bench]]
+name = "fibonacci_stack_bytecode"
 harness = false
