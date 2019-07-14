@@ -1,3 +1,4 @@
+pub mod bytecode_builder;
 pub mod memory;
 pub mod primitive_value;
 pub mod test_utils;

@@ -3,7 +3,7 @@ use crate::primitive_value::PrimitiveValue;
 
 const N_REGISTERS: usize = 8;
 
-type Register = u8;
+pub type Register = u8;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {
@@ -40,9 +40,9 @@ pub enum Op {
     Not(Register, Register),
 
     // Branching
-    Jmp(Operand<i8>),
+    Jmp(Operand<isize>),
     JmpFar(&'static [Op]),
-    JmpCond(Operand<i8>, Register),
+    JmpCond(Operand<isize>, Register),
 
     // Records
     Alloc(Register, usize),
