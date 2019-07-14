@@ -18,20 +18,6 @@ fn fibonacci(n: i64) -> &'static [Op] {
     const CONT: u8 = 5;
     const FIB: u8 = 4;
 
-    macro_rules! push {
-            ($r:expr) => {
-                Op::SetRec(STACK, R(SP), R(r)),
-                Op::Inc(SP),
-            }
-        }
-
-    macro_rules! pop {
-            ($r:expr) => (
-                Op::Dec(SP),
-                Op::GetRec(r, STACK, R(SP)),
-            )
-        }
-
     let after_fib2 = store_code_block(vec![
         //pop!(1)
         Op::Dec(SP),

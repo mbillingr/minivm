@@ -7,15 +7,19 @@ type Register = u8;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {
+    // Trivial Operations
     Term,
     Nop,
 
+    // Debugging Helpers
     Debug(&'static str, Register),
 
+    // Register Manipulation
     Const(Register, PrimitiveValue),
     Copy(Register, Register),
     Swap(Register, Register),
 
+    // Arithmetic
     Inc(Register),
     Dec(Register),
     Add(Register, Register, Operand<PrimitiveValue>),
@@ -28,20 +32,24 @@ pub enum Op {
         Operand<PrimitiveValue>,
     ),
 
+    // Comparison
     Equal(Register, Register, Operand<PrimitiveValue>),
     Uneq(Register, Register, Operand<PrimitiveValue>),
     Less(Register, Operand<PrimitiveValue>, Operand<PrimitiveValue>),
     LessEq(Register, Operand<PrimitiveValue>, Operand<PrimitiveValue>),
     Not(Register, Register),
 
+    // Branching
     Jmp(Operand<i8>),
     JmpFar(&'static [Op]),
     JmpCond(Operand<i8>, Register),
 
+    // Records
     Alloc(Register, usize),
     GetRec(Register, Register, Operand<usize>),
     SetRec(Register, Operand<usize>, Operand<PrimitiveValue>),
 
+    // Pairs
     Cons(Register, Operand<PrimitiveValue>, Operand<PrimitiveValue>),
     Car(Register, Register),
     Cdr(Register, Register),
@@ -173,12 +181,6 @@ pub fn run(mut code: &[Op], storage: &RecordStorage) -> PrimitiveValue {
                 register[dst as usize] = storage.get_record(rec)[idx];
                 pc += 1;
             }
-            /*Op::GetRecDyn(dst, r, i) => {
-                let rec = register[r as usize].as_record();
-                let idx = register[i as usize].as_int() as usize;
-                register[dst as usize] = storage.get_record(rec)[idx];
-                pc += 1;
-            }*/
             Op::SetRec(r, i, v) => {
                 let rec = register[r as usize].as_record();
                 let idx = i.eval(&register);
@@ -186,12 +188,6 @@ pub fn run(mut code: &[Op], storage: &RecordStorage) -> PrimitiveValue {
                 storage.set_element(rec, idx, value);
                 pc += 1;
             }
-            /*Op::SetRecDyn(r, i, v) => {
-                let rec = register[r as usize].as_record();
-                let idx = register[i as usize].as_int() as usize;
-                storage.set_element(rec, idx, register[v as usize]);
-                pc += 1;
-            }*/
             Op::Cons(dst, car, cdr) => {
                 let rec = storage.allocate_record(2, &mut register);
                 storage.set_element(rec, 0, car.eval(&register));
@@ -722,20 +718,6 @@ mod tests {
         const SP: u8 = 6;
         const CONT: u8 = 5;
         const FIB: u8 = 4;
-
-        macro_rules! push {
-            ($r:expr) => {
-                Op::SetRec(STACK, R(SP), R(r)),
-                Op::Inc(SP),
-            }
-        }
-
-        macro_rules! pop {
-            ($r:expr) => (
-                Op::Dec(SP),
-                Op::GetRec(r, STACK, R(SP)),
-            )
-        }
 
         let after_fib2 = store_code_block(vec![
             //pop!(1)
