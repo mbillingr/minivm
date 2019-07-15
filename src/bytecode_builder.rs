@@ -1,152 +1,236 @@
+//! This module provides a `Block` based `Builder` for conveniently assembling bytecode.
+//!
+//! Directly creating bytecode instructions is cumbersome because jump targets or offsets are
+//! not known in advance. This instruction `Block`s in this module define a call flow graph.
+//! No jumps may happen into or out of the middle of a `Block`. Every block must be terminated
+//! with a branch (jump) or other terminal instruction.
+//! Starting from an entry block, the `Builder` traverses the `Block` graph and automatically
+//! generates bytecode.
+
 use crate::virtual_machine::{Op, Operand, Register};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-type BlockRef = Rc<Block>;
-type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, PartialEq)]
-enum Error {
-    UnterminatedBlock(BlockRef),
+pub enum Error {
+    UnterminatedBlock(Block),
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 enum TermOp {
     Term,
-    Branch(BlockRef),
-    CondBranch(Register, BlockRef, BlockRef),
+    Branch(Block),
+    CondBranch(Register, Block, Block),
 }
 
-struct Builder {
+pub struct Builder {
     code: Vec<Op>,
-    labels: HashMap<usize, usize>,
+    labels: HashMap<usize, isize>,
 }
 
 impl Builder {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Builder {
             code: vec![],
             labels: HashMap::new(),
         }
     }
 
-    fn build(block: &BlockRef) -> Result<Vec<Op>> {
+    pub fn build(block: &Block) -> Result<Vec<Op>> {
         let mut finalizer = Self::new();
         finalizer.append_block(block)?;
         Ok(finalizer.code)
     }
 
-    fn append_block(&mut self, block: &BlockRef) -> Result<()> {
-        if self.labels.contains_key(&Block::addr(&block)) {
+    fn append_block(&mut self, block: &Block) -> Result<()> {
+        if self.labels.contains_key(&Block::id(&block)) {
             return Ok(());
         }
         Block::verify(&block)?;
 
-        self.labels.insert(Block::addr(&block), self.code.len());
-        self.code.extend_from_slice(block.ops.borrow().as_slice());
+        self.labels.insert(Block::id(&block), self.current_addr());
+        self.code.extend(block.get_ops());
 
-        match &*block.last.borrow() {
-            Some(TermOp::Term) => self.code.push(Op::Term),
-            Some(TermOp::Branch(dst)) => {
-                if let Some(l) = self.labels.get(&Block::addr(&dst)) {
-                    self.code
-                        .push(Op::Jmp(Operand::I(*l as isize - self.code.len() as isize)))
-                } else {
-                    self.append_block(dst)?;
-                }
-            }
-            Some(TermOp::CondBranch(reg, a, b)) => {
-                let block_a = self.labels.get(&Block::addr(&a));
-                let block_b = self.labels.get(&Block::addr(&b));
-
-                match (block_a, block_b) {
-                    (Some(la), Some(lb)) => {
-                        self.code.push(Op::JmpCond(
-                            Operand::I(*la as isize - self.code.len() as isize),
-                            *reg,
-                        ));
-                        self.code
-                            .push(Op::Jmp(Operand::I(*lb as isize - self.code.len() as isize)));
-                    }
-                    (Some(la), None) => {
-                        self.code.push(Op::JmpCond(
-                            Operand::I(*la as isize - self.code.len() as isize),
-                            *reg,
-                        ));
-                        self.append_block(b)?;
-                    }
-                    (None, Some(lb)) => {
-                        self.code.push(Op::JmpCond(Operand::I(2), *reg));
-                        self.code
-                            .push(Op::Jmp(Operand::I(*lb as isize - self.code.len() as isize)));
-                        self.append_block(a)?;
-                    }
-                    (None, None) => {
-                        let jmp_pos = self.code.len();
-                        self.code.push(Op::Nop); // placeholder
-                        self.append_block(b)?;
-                        self.append_block(a)?;
-                        let la = self.labels.get(&Block::addr(&a)).unwrap();
-                        self.code[jmp_pos] =
-                            Op::JmpCond(Operand::I(*la as isize - jmp_pos as isize), *reg);
-                    }
-                }
-            }
-            None => unreachable!(),
+        match block.get_terminal_op().unwrap() {
+            TermOp::Term => self.append_termination(),
+            TermOp::Branch(dst) => self.append_branch(&dst),
+            TermOp::CondBranch(reg, a, b) => self.append_conditional_branch(reg, &a, &b),
         }
+    }
 
+    fn append_termination(&mut self) -> Result<()> {
+        self.code.push(Op::Term);
         Ok(())
+    }
+
+    fn append_branch(&mut self, dst: &Block) -> Result<()> {
+        if let Some(dst_addr) = self.labels.get(&dst.id()) {
+            let offset = dst_addr - self.current_addr();
+            self.code.push(Op::Jmp(Operand::I(offset)));
+            Ok(())
+        } else {
+            self.append_block(dst)
+        }
+    }
+
+    fn append_conditional_branch(
+        &mut self,
+        reg: Register,
+        then_block: &Block,
+        else_block: &Block,
+    ) -> Result<()> {
+        let found_then_block = self.labels.get(&then_block.id());
+        let found_else_block = self.labels.get(&else_block.id());
+
+        match (found_then_block, found_else_block) {
+            (Some(then_addr), Some(_)) => {
+                self.code.push(Op::JmpCond(
+                    Operand::I(then_addr - self.current_addr()),
+                    reg,
+                ));
+                self.append_branch(else_block)
+            }
+            (Some(then_addr), None) => {
+                self.code.push(Op::JmpCond(
+                    Operand::I(then_addr - self.current_addr()),
+                    reg,
+                ));
+                self.append_block(&else_block)
+            }
+            (None, Some(_)) => {
+                self.code.push(Op::JmpCond(Operand::I(2), reg));
+                self.append_branch(else_block)?;
+                self.append_block(&then_block)
+            }
+            (None, None) => {
+                let jmp_pos = self.current_addr();
+                self.code.push(Op::Nop); // placeholder
+                self.append_block(&else_block)?;
+                self.append_block(&then_block)?;
+                let then_addr = self.labels.get(&Block::id(&then_block)).unwrap();
+                self.code[jmp_pos as usize] = Op::JmpCond(Operand::I(then_addr - jmp_pos), reg);
+                Ok(())
+            }
+        }
+    }
+
+    fn current_addr(&self) -> isize {
+        self.code.len() as isize
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Block {
+    data: Rc<RefCell<BlockData>>,
+}
+
+impl Block {
+    pub fn new() -> Block {
+        Block {
+            data: Rc::new(RefCell::new(BlockData::new())),
+        }
+    }
+
+    pub fn with(&self, body: impl FnOnce(&mut BlockData)) {
+        let mut data = self.data.borrow_mut();
+        body(&mut data)
+    }
+
+    fn has_terminal_instruction(&self) -> bool {
+        (*self.data).borrow().has_terminal_instruction()
+    }
+
+    pub fn add_op(&self, op: Op) {
+        let mut data = self.data.borrow_mut();
+        assert!(!data.has_terminal_instruction());
+        data.add_op(op)
+    }
+
+    pub fn branch(&self, target: &Block) {
+        let mut data = self.data.borrow_mut();
+        assert!(!data.has_terminal_instruction());
+        data.branch(target)
+    }
+
+    pub fn branch_conditional(&self, r: Register, then_block: &Block, else_block: &Block) {
+        let mut data = self.data.borrow_mut();
+        assert!(!data.has_terminal_instruction());
+        data.branch_conditional(r, then_block, else_block)
+    }
+
+    pub fn terminate(&self) {
+        let mut data = self.data.borrow_mut();
+        assert!(!data.has_terminal_instruction());
+        data.terminate()
+    }
+
+    fn get_ops(&self) -> Vec<Op> {
+        (*self.data).borrow().get_ops().to_vec()
+    }
+
+    fn get_terminal_op(&self) -> Option<TermOp> {
+        (*self.data).borrow().get_terminal_op().cloned()
+    }
+
+    fn verify(&self) -> Result<()> {
+        if !self.has_terminal_instruction() {
+            return Err(Error::UnterminatedBlock(self.clone()));
+        }
+        Ok(())
+    }
+
+    fn id(&self) -> usize {
+        self.data.as_ref() as *const _ as usize
     }
 }
 
 #[derive(Debug, PartialEq)]
-struct Block {
-    ops: RefCell<Vec<Op>>,
-    last: RefCell<Option<TermOp>>,
+pub struct BlockData {
+    ops: Vec<Op>,
+    last: Option<TermOp>,
 }
 
-impl Block {
-    fn new() -> BlockRef {
-        Rc::new(Block {
-            ops: RefCell::new(vec![]),
-            last: RefCell::new(None),
-        })
+impl BlockData {
+    fn new() -> Self {
+        BlockData {
+            ops: vec![],
+            last: None,
+        }
     }
 
-    fn add_op(&self, op: Op) {
-        assert!(self.last.borrow().is_none());
-        self.ops.borrow_mut().push(op);
+    fn has_terminal_instruction(&self) -> bool {
+        self.last.is_some()
     }
 
-    fn branch(&self, target: &BlockRef) {
-        assert!(self.last.borrow().is_none());
-        *self.last.borrow_mut() = Some(TermOp::Branch(target.clone()));
+    fn add_op(&mut self, op: Op) {
+        self.ops.push(op);
     }
 
-    fn branch_conditional(&self, r: Register, then_block: &BlockRef, else_block: &BlockRef) {
-        assert!(self.last.borrow().is_none());
-        *self.last.borrow_mut() = Some(TermOp::CondBranch(
+    fn branch(&mut self, target: &Block) {
+        self.last = Some(TermOp::Branch(target.clone()));
+    }
+
+    fn branch_conditional(&mut self, r: Register, then_block: &Block, else_block: &Block) {
+        self.last = Some(TermOp::CondBranch(
             r,
             then_block.clone(),
             else_block.clone(),
         ));
     }
 
-    fn terminate(&self) {
-        assert!(self.last.borrow().is_none());
-        *self.last.borrow_mut() = Some(TermOp::Term);
+    fn get_ops(&self) -> &[Op] {
+        self.ops.as_slice()
     }
 
-    fn verify(blk: &BlockRef) -> Result<()> {
-        if blk.last.borrow().is_none() {
-            return Err(Error::UnterminatedBlock(blk.clone()));
-        }
-        Ok(())
+    fn get_terminal_op(&self) -> Option<&TermOp> {
+        self.last.as_ref()
     }
 
-    fn addr(blk: &BlockRef) -> usize {
-        blk.as_ref() as *const _ as usize
+    fn terminate(&mut self) {
+        self.last = Some(TermOp::Term);
     }
 }
 
