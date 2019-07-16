@@ -1,4 +1,5 @@
 pub mod bytecode_builder;
+pub mod core_compiler;
 pub mod memory;
 pub mod primitive_value;
 pub mod test_utils;
