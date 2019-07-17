@@ -1,4 +1,4 @@
-use crate::memory::RecordStorage;
+use crate::memory::{store_code_block, RecordStorage};
 use crate::primitive_value::PrimitiveValue;
 use crate::virtual_machine::{run, Op};
 
@@ -52,7 +52,8 @@ impl TestResult {
     }
 }
 
-pub fn run_vm_test(code: &[Op], expect: impl Into<TestResult>) {
+pub fn run_vm_test(code: Vec<Op>, expect: impl Into<TestResult>) {
+    let code = store_code_block(code);
     let storage = RecordStorage::new(0);
     let result = run(code, &storage);
     assert_eq!(TestResult::from_run(result, &storage), expect.into());

@@ -43,6 +43,7 @@ pub enum Op {
     Jmp(Operand<isize>),
     JmpFar(&'static [Op]),
     JmpCond(Operand<isize>, Register),
+    LoadLabel(Register, isize),
 
     // Records
     Alloc(Register, usize),
@@ -75,7 +76,12 @@ where
     }
 }
 
-pub fn run(mut code: &[Op], storage: &RecordStorage) -> PrimitiveValue {
+pub fn eval(code: &'static [Op]) -> PrimitiveValue {
+    let storage = RecordStorage::new(0);
+    run(code, &storage)
+}
+
+pub fn run(mut code: &'static [Op], storage: &RecordStorage) -> PrimitiveValue {
     let mut register = [PrimitiveValue::Undefined; N_REGISTERS];
     let mut pc = 0;
     loop {
@@ -160,7 +166,7 @@ pub fn run(mut code: &[Op], storage: &RecordStorage) -> PrimitiveValue {
                             code = register[r as usize].as_codeblock();
                             pc = 0;
                         }
-                        Operand::I(relative) => pc = (pc as isize + relative as isize) as usize,
+                        Operand::I(relative) => pc = (pc as isize + relative) as usize,
                     }
                 } else {
                     pc += 1;
@@ -169,6 +175,11 @@ pub fn run(mut code: &[Op], storage: &RecordStorage) -> PrimitiveValue {
             Op::JmpFar(target) => {
                 code = target;
                 pc = 0;
+            }
+            Op::LoadLabel(r, offset) => {
+                register[r as usize] =
+                    PrimitiveValue::CodeBlock(&code[(pc as isize + offset) as usize..]);
+                pc += 1;
             }
             Op::Alloc(r, size) => {
                 let rec = storage.allocate_record(size, &mut register);
@@ -218,17 +229,20 @@ mod tests {
 
     #[test]
     fn trivial_program_terminates_without_error() {
-        run_vm_test(&[Op::Term], PrimitiveValue::Undefined)
+        run_vm_test(vec![Op::Term], PrimitiveValue::Undefined)
     }
 
     #[test]
     fn simple_block() {
-        run_vm_test(&[Op::Nop, Op::Nop, Op::Term], PrimitiveValue::Undefined)
+        run_vm_test(vec![Op::Nop, Op::Nop, Op::Term], PrimitiveValue::Undefined)
     }
 
     #[test]
     fn constant() {
-        run_vm_test(&[Op::Const(0, PrimitiveValue::Integer(42)), Op::Term], 42)
+        run_vm_test(
+            vec![Op::Const(0, PrimitiveValue::Integer(42)), Op::Term],
+            42,
+        )
     }
 
     #[test]
@@ -242,14 +256,14 @@ mod tests {
             Op::Cons(0, R(0), R(1)),
             Op::Term,
         ];
-        run_vm_test(&code, vec![2, 1]);
-        run_vm_test(&code, vec![2, 1]);
+        run_vm_test(code.clone(), vec![2, 1]);
+        run_vm_test(code.clone(), vec![2, 1]);
     }
 
     #[test]
     fn copy() {
         run_vm_test(
-            &[
+            vec![
                 Op::Const(0, PrimitiveValue::Integer(1)),
                 Op::Const(1, PrimitiveValue::Integer(2)),
                 Op::Copy(0, 1),
@@ -263,7 +277,7 @@ mod tests {
     #[test]
     fn swap() {
         run_vm_test(
-            &[
+            vec![
                 Op::Const(0, PrimitiveValue::Integer(1)),
                 Op::Const(1, PrimitiveValue::Integer(2)),
                 Op::Swap(0, 1),
@@ -277,7 +291,7 @@ mod tests {
     #[test]
     fn increment() {
         run_vm_test(
-            &[
+            vec![
                 Op::Const(0, PrimitiveValue::Integer(1)),
                 Op::Inc(0),
                 Op::Term,
@@ -289,7 +303,7 @@ mod tests {
     #[test]
     fn decrement() {
         run_vm_test(
-            &[
+            vec![
                 Op::Const(0, PrimitiveValue::Integer(0)),
                 Op::Dec(0),
                 Op::Term,
@@ -301,7 +315,7 @@ mod tests {
     #[test]
     fn integer_addition() {
         run_vm_test(
-            &[
+            vec![
                 Op::Const(1, PrimitiveValue::Integer(10)),
                 Op::Const(2, PrimitiveValue::Integer(20)),
                 Op::Add(0, 1, R(2)),
@@ -314,7 +328,7 @@ mod tests {
     #[test]
     fn integer_subtraction() {
         run_vm_test(
-            &[
+            vec![
                 Op::Const(1, PrimitiveValue::Integer(10)),
                 Op::Const(2, PrimitiveValue::Integer(20)),
                 Op::Sub(0, 1, R(2)),
@@ -327,7 +341,7 @@ mod tests {
     #[test]
     fn integer_multiplication() {
         run_vm_test(
-            &[
+            vec![
                 Op::Const(1, PrimitiveValue::Integer(10)),
                 Op::Const(2, PrimitiveValue::Integer(20)),
                 Op::Mul(0, 1, R(2)),
@@ -340,7 +354,7 @@ mod tests {
     #[test]
     fn integer_division() {
         run_vm_test(
-            &[
+            vec![
                 Op::Const(1, PrimitiveValue::Integer(50)),
                 Op::Const(2, PrimitiveValue::Integer(20)),
                 Op::Div(0, 1, R(1), R(2)),
@@ -354,7 +368,7 @@ mod tests {
     #[test]
     fn jump() {
         run_vm_test(
-            &[
+            vec![
                 Op::Const(0, PrimitiveValue::Integer(0)),
                 Op::Inc(0),
                 Op::Jmp(I(4)),
@@ -377,7 +391,7 @@ mod tests {
             Op::Term,
         ];
 
-        run_vm_test(&code, 11);
+        run_vm_test(code, 11);
     }
 
     #[test]
@@ -394,13 +408,13 @@ mod tests {
             Op::Term,
         ];
 
-        run_vm_test(&code, 11);
+        run_vm_test(code, 11);
     }
 
     #[test]
     fn record_allocation() {
         run_vm_test(
-            &[Op::Alloc(0, 1234), Op::Term],
+            vec![Op::Alloc(0, 1234), Op::Term],
             vec![PrimitiveValue::Undefined; 1234],
         )
     }
@@ -408,7 +422,7 @@ mod tests {
     #[test]
     fn record_set_element() {
         run_vm_test(
-            &[
+            vec![
                 Op::Alloc(0, 3),
                 Op::SetRec(0, I(0), I(PrimitiveValue::Integer(3))),
                 Op::SetRec(0, I(1), I(PrimitiveValue::Integer(42))),
@@ -423,7 +437,7 @@ mod tests {
     #[test]
     fn record_dynamic_set_element() {
         run_vm_test(
-            &[
+            vec![
                 Op::Const(1, PrimitiveValue::Integer(0)),
                 Op::Const(2, PrimitiveValue::Integer(100)),
                 Op::Alloc(0, 3),
@@ -445,7 +459,7 @@ mod tests {
     #[test]
     fn record_get_element() {
         run_vm_test(
-            &[
+            vec![
                 Op::Alloc(1, 3),
                 Op::SetRec(1, I(0), I(PrimitiveValue::Integer(3))),
                 Op::SetRec(1, I(1), I(PrimitiveValue::Integer(42))),
@@ -461,7 +475,7 @@ mod tests {
     #[test]
     fn record_dynamic_get_element() {
         run_vm_test(
-            &[
+            vec![
                 Op::Alloc(1, 3),
                 Op::SetRec(1, I(0), I(PrimitiveValue::Integer(3))),
                 Op::SetRec(1, I(1), I(PrimitiveValue::Integer(42))),
@@ -478,7 +492,7 @@ mod tests {
     #[test]
     fn cons() {
         run_vm_test(
-            &[
+            vec![
                 Op::Const(1, PrimitiveValue::Integer(1)),
                 Op::Cons(0, R(1), I(PrimitiveValue::Nil)),
                 Op::Cons(0, I(PrimitiveValue::Integer(2)), R(0)),
@@ -493,7 +507,7 @@ mod tests {
     #[test]
     fn car() {
         run_vm_test(
-            &[
+            vec![
                 Op::Const(2, PrimitiveValue::Integer(2)),
                 Op::Const(1, PrimitiveValue::Integer(1)),
                 Op::Cons(0, R(1), R(2)),
@@ -507,7 +521,7 @@ mod tests {
     #[test]
     fn cdr() {
         run_vm_test(
-            &[
+            vec![
                 Op::Const(2, PrimitiveValue::Integer(2)),
                 Op::Const(1, PrimitiveValue::Integer(1)),
                 Op::Cons(0, R(1), R(2)),
@@ -563,7 +577,7 @@ mod tests {
         let final_continuation = store_code_block(vec![Op::Copy(0, 1), Op::Term]);
 
         run_vm_test(
-            &[
+            vec![
                 Op::Const(1, PrimitiveValue::Integer(0)), // initial n
                 Op::Alloc(2, 1),                          // allocate closure with no variables
                 Op::SetRec(2, I(0), I(PrimitiveValue::CodeBlock(final_continuation))), // put code in closure
@@ -573,7 +587,7 @@ mod tests {
         );
 
         run_vm_test(
-            &[
+            vec![
                 // fact(1, final_continuation)
                 Op::Const(1, PrimitiveValue::Integer(1)),
                 Op::Alloc(2, 1),
@@ -584,7 +598,7 @@ mod tests {
         );
 
         run_vm_test(
-            &[
+            vec![
                 // fact(2, final_continuation)
                 Op::Const(1, PrimitiveValue::Integer(2)),
                 Op::Alloc(2, 1),
@@ -595,7 +609,7 @@ mod tests {
         );
 
         run_vm_test(
-            &[
+            vec![
                 // fact(3, final_continuation)
                 Op::Const(1, PrimitiveValue::Integer(3)),
                 Op::Alloc(2, 1),
@@ -606,7 +620,7 @@ mod tests {
         );
 
         run_vm_test(
-            &[
+            vec![
                 // fact(5, final_continuation)
                 Op::Const(1, PrimitiveValue::Integer(5)),
                 Op::Alloc(2, 1),
@@ -617,7 +631,7 @@ mod tests {
         );
 
         run_vm_test(
-            &[
+            vec![
                 // fact(10, final_continuation)
                 Op::Const(1, PrimitiveValue::Integer(10)),
                 Op::Alloc(2, 1),
@@ -685,7 +699,7 @@ mod tests {
 
         let test_fib = |n: i64, expect: i64| {
             run_vm_test(
-                &[
+                vec![
                     Op::Const(1, PrimitiveValue::Integer(n)),     // initial n
                     Op::Const(5, PrimitiveValue::CodeBlock(fib)), // put fib in a register, so lambda1 can find it
                     Op::Alloc(2, 1), // allocate closure with no variables
@@ -771,7 +785,7 @@ mod tests {
 
         let test_fib = |n: i64, expect: i64| {
             run_vm_test(
-                &[
+                vec![
                     Op::Alloc(STACK, 1024),
                     Op::Const(SP, PrimitiveValue::Integer(0)),
                     Op::Const(CONT, PrimitiveValue::CodeBlock(done)),

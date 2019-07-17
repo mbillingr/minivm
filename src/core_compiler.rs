@@ -1,27 +1,35 @@
 use crate::bytecode_builder::{Block, Builder};
 use crate::primitive_value::PrimitiveValue;
-use crate::virtual_machine::{Op, Register};
-
-#[derive(Debug, Clone)]
-pub enum AtomicExpression {
-    Undefined,
-    Nil,
-    Integer(i64),
-    Lambda(Vec<String>, Box<Expression>),
-}
-
-#[derive(Debug, Clone)]
-pub enum ComplexExpression {
-    Apply(AtomicExpression, Vec<AtomicExpression>),
-    If(AtomicExpression, Box<Expression>, Box<Expression>),
-    Atomic(AtomicExpression),
-}
+use crate::virtual_machine::{Op, Operand, Register};
 
 #[derive(Debug, Clone)]
 pub enum Expression {
     Let(String, ComplexExpression, Box<Expression>),
     Atomic(AtomicExpression),
     Complex(ComplexExpression),
+}
+
+#[derive(Debug, Clone)]
+pub enum ComplexExpression {
+    Apply(AtomicExpression, Vec<AtomicExpression>),
+    ApplyPrimitive(PrimitiveFunction, Vec<AtomicExpression>),
+    If(AtomicExpression, Box<Expression>, Box<Expression>),
+    Atomic(AtomicExpression),
+}
+
+#[derive(Debug, Clone)]
+pub enum AtomicExpression {
+    Undefined,
+    Nil,
+    Integer(i64),
+    Variable(String),
+    Lambda(Vec<String>, Box<Expression>),
+}
+
+#[derive(Debug, Clone)]
+pub enum PrimitiveFunction {
+    Add,
+    Mul,
 }
 
 pub struct Compiler {
@@ -63,20 +71,17 @@ impl Compiler {
     ) -> Block {
         let register = self.assign_register();
 
-        let connector = Block::new();
-        let def_block = self.compile_complex(vardef, Linkage::branch(register, &connector));
-
         self.begin_scope(&varname, register);
         let body_block = self.compile_expr(body, linkage);
         self.end_scope(&varname);
 
-        connector.branch(&body_block);
-        def_block
+        self.compile_complex(vardef, Linkage::branch(register, &body_block))
     }
 
     fn compile_complex(&mut self, cexp: ComplexExpression, linkage: Linkage) -> Block {
         use ComplexExpression::*;
         match cexp {
+            Atomic(aexp) => self.compile_atomic(aexp, linkage),
             If(cond, then_exp, else_exp) => {
                 let cond_register = self.assign_register();
                 let cond_block = self.compile_atomic(cond, Linkage::none(cond_register));
@@ -87,7 +92,42 @@ impl Compiler {
                 cond_block.branch_conditional(cond_register, &then_block, &else_block);
                 cond_block
             }
-            Atomic(aexp) => self.compile_atomic(aexp, linkage),
+            ApplyPrimitive(prim, args) => {
+                let mut regs = vec![];
+                let last_block = Block::new();
+                let mut block = last_block.clone();
+                for arg in args {
+                    let reg = self.assign_register();
+                    regs.push(reg);
+                    self.begin_scope("argtmp", reg);
+                    block = self.compile_atomic(arg, Linkage::branch(reg, &block));
+                }
+
+                let r_out = linkage.output_register();
+
+                match prim {
+                    PrimitiveFunction::Add => {
+                        last_block.add_op(Op::Add(r_out, regs[0], Operand::R(regs[1])));
+                        for r in regs.iter().skip(2) {
+                            last_block.add_op(Op::Add(r_out, r_out, Operand::R(*r)));
+                        }
+                    }
+
+                    PrimitiveFunction::Mul => {
+                        last_block.add_op(Op::Mul(r_out, regs[0], Operand::R(regs[1])));
+                        for r in regs.iter().skip(2) {
+                            last_block.add_op(Op::Mul(r_out, r_out, Operand::R(*r)));
+                        }
+                    }
+                }
+
+                for _ in regs {
+                    self.end_scope("argtmp");
+                }
+
+                linkage.compile(last_block);
+                block
+            }
             _ => unimplemented!(),
         }
     }
@@ -102,6 +142,28 @@ impl Compiler {
             )),
             Nil => block.add_op(Op::Const(linkage.output_register(), PrimitiveValue::Nil)),
             Integer(i) => block.add_op(Op::Const(linkage.output_register(), i.into())),
+            Variable(name) => block.add_op(Op::Copy(
+                linkage.output_register(),
+                self.lookup(&name).expect("undefined variable"),
+            )),
+            Lambda(params, body) => {
+                let mut func_compiler = Compiler::new();
+
+                for p in &params {
+                    let r = func_compiler.assign_register();
+                    func_compiler.begin_scope(p, r);
+                }
+
+                let kill = Block::new();
+                kill.terminate();
+                let body_block = func_compiler.compile_expr(*body, Linkage::branch(0, &kill));
+
+                for p in &params {
+                    func_compiler.end_scope(p);
+                }
+
+                block.set_function(linkage.output_register(), body_block);
+            }
             _ => unimplemented!(),
         }
         linkage.compile(block)
@@ -121,6 +183,13 @@ impl Compiler {
 
     fn end_scope(&mut self, varname: &str) {
         assert_eq!(self.variables_in_registers.pop().unwrap(), varname);
+    }
+
+    fn lookup(&mut self, varname: &str) -> Option<Register> {
+        self.variables_in_registers
+            .iter()
+            .position(|var| var == varname)
+            .map(|idx| idx as Register)
     }
 }
 
@@ -145,6 +214,10 @@ impl<'a> Linkage<'a> {
         }
     }
 
+    fn function() -> Self {
+        unimplemented!()
+    }
+
     fn compile(&self, block: Block) -> Block {
         if let Some(to) = self.branch_to {
             block.branch(to)
@@ -160,6 +233,9 @@ impl<'a> Linkage<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bytecode_builder::Builder;
+    use crate::memory::store_code_block;
+    use crate::virtual_machine::eval;
     use crate::virtual_machine::Operand;
 
     #[test]
@@ -216,6 +292,33 @@ mod tests {
     }
 
     #[test]
+    fn compile_atomic_lambda() {
+        let done = Block::new();
+        done.terminate();
+        let actual = Compiler::new().compile_atomic(
+            AtomicExpression::Lambda(
+                vec!["x".to_string()],
+                Box::new(Expression::Complex(ComplexExpression::ApplyPrimitive(
+                    PrimitiveFunction::Mul,
+                    vec![
+                        AtomicExpression::Variable("x".to_string()),
+                        AtomicExpression::Variable("x".to_string()),
+                    ],
+                ))),
+            ),
+            Linkage::branch(0, &done),
+        );
+        let expect = Block::new();
+        expect.add_op(Op::Const(0, PrimitiveValue::Integer(42)));
+
+        println!("{:?}", actual);
+
+        panic!("{:?}", Builder::build(&actual));
+
+        assert_eq!(actual, expect);
+    }
+
+    #[test]
     fn compile_complex_if() {
         let register = 1;
         let actual = Compiler::new().compile_complex(
@@ -245,6 +348,77 @@ mod tests {
             Compiler::new().compile_complex(ComplexExpression::Atomic(aexp.clone()), linkage);
         let expect = Compiler::new().compile_atomic(aexp.clone(), linkage);
         assert_eq!(actual, expect);
+    }
+
+    #[test]
+    fn compile_complex_primitive_add() {
+        use AtomicExpression::*;
+        use ComplexExpression::*;
+        use PrimitiveFunction::*;
+
+        let done = Block::new();
+        done.terminate();
+
+        let actual = Compiler::new().compile_expr(
+            Expression::Complex(ApplyPrimitive(
+                Add,
+                vec![Integer(1), Integer(2), Integer(3), Integer(4)],
+            )),
+            Linkage::branch(0, &done),
+        );
+
+        let code = store_code_block(Builder::build(&actual).unwrap());
+        assert_eq!(eval(code), 10.into());
+    }
+
+    #[test]
+    fn compile_expression_let() {
+        let actual = Compiler::new().compile_expr(
+            Expression::Let(
+                "x".to_string(),
+                ComplexExpression::Atomic(AtomicExpression::Integer(12345)),
+                Box::new(Expression::Atomic(AtomicExpression::Variable(
+                    "x".to_string(),
+                ))),
+            ),
+            Linkage::none(3),
+        );
+        let expect = Block::new();
+        let body = Block::new();
+        expect.add_op(Op::Const(0, PrimitiveValue::Integer(12345)));
+        expect.branch(&body);
+        body.add_op(Op::Copy(3, 0));
+        assert_eq!(actual, expect);
+    }
+
+    #[test]
+    fn compile_expression_nested_let() {
+        use AtomicExpression::*;
+        use ComplexExpression::*;
+        use PrimitiveFunction::*;
+
+        let done = Block::new();
+        done.terminate();
+
+        let actual = Compiler::new().compile_expr(
+            Expression::Let(
+                "x".to_string(),
+                Atomic(Integer(10)),
+                Box::new(Expression::Let(
+                    "y".to_string(),
+                    Atomic(Variable("x".to_string())),
+                    Box::new(Expression::Let(
+                        "z".to_string(),
+                        Atomic(Variable("y".to_string())),
+                        Box::new(Expression::Atomic(Variable("z".to_string()))),
+                    )),
+                )),
+            ),
+            Linkage::branch(0, &done),
+        );
+
+        let code = store_code_block(Builder::build(&actual).unwrap());
+        assert_eq!(eval(code), 10.into());
     }
 
     #[test]

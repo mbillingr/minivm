@@ -7,6 +7,7 @@
 //! Starting from an entry block, the `Builder` traverses the `Block` graph and automatically
 //! generates bytecode.
 
+use crate::primitive_value::PrimitiveValue;
 use crate::virtual_machine::{Op, Operand, Register};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -52,7 +53,15 @@ impl Builder {
         Block::verify(&block)?;
 
         self.labels.insert(Block::id(&block), self.current_addr());
-        self.code.extend(block.get_ops());
+
+        if let Some((r, fnblock)) = block.function() {
+            let func = Builder::build(&fnblock)?;
+            self.code.push(Op::LoadLabel(r, 2));
+            self.code.push(Op::Jmp(Operand::I(1 + func.len() as isize)));
+            self.code.extend(func);
+        } else {
+            self.code.extend(block.get_ops());
+        }
 
         match block.get_terminal_op().unwrap() {
             TermOp::Term => self.append_termination(),
@@ -149,6 +158,11 @@ impl Block {
         data.add_op(op)
     }
 
+    pub fn set_function(&self, r: Register, fnblock: Block) {
+        let mut data = self.data.borrow_mut();
+        data.set_function(r, fnblock)
+    }
+
     pub fn branch(&self, target: &Block) {
         let mut data = self.data.borrow_mut();
         assert!(!data.has_terminal_instruction());
@@ -165,6 +179,10 @@ impl Block {
         let mut data = self.data.borrow_mut();
         assert!(!data.has_terminal_instruction());
         data.terminate()
+    }
+
+    pub fn function(&self) -> Option<(Register, Block)> {
+        self.data.borrow().function().cloned()
     }
 
     fn get_ops(&self) -> Vec<Op> {
@@ -191,6 +209,7 @@ impl Block {
 pub struct BlockData {
     ops: Vec<Op>,
     last: Option<TermOp>,
+    func: Option<(Register, Block)>,
 }
 
 impl BlockData {
@@ -198,6 +217,7 @@ impl BlockData {
         BlockData {
             ops: vec![],
             last: None,
+            func: None,
         }
     }
 
@@ -207,6 +227,10 @@ impl BlockData {
 
     fn add_op(&mut self, op: Op) {
         self.ops.push(op);
+    }
+
+    pub fn set_function(&mut self, r: Register, fnblock: Block) {
+        self.func = Some((r, fnblock));
     }
 
     fn branch(&mut self, target: &Block) {
@@ -219,6 +243,10 @@ impl BlockData {
             then_block.clone(),
             else_block.clone(),
         ));
+    }
+
+    pub fn function(&self) -> Option<&(Register, Block)> {
+        self.func.as_ref()
     }
 
     fn get_ops(&self) -> &[Op] {
