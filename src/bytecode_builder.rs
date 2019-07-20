@@ -7,7 +7,6 @@
 //! Starting from an entry block, the `Builder` traverses the `Block` graph and automatically
 //! generates bytecode.
 
-use crate::primitive_value::PrimitiveValue;
 use crate::virtual_machine::{Op, Operand, Register};
 use std::cell::RefCell;
 use std::collections::HashMap;

@@ -164,7 +164,6 @@ impl Compiler {
 
                 block.set_function(linkage.output_register(), body_block);
             }
-            _ => unimplemented!(),
         }
         linkage.compile(block)
     }
@@ -311,11 +310,14 @@ mod tests {
         let expect = Block::new();
         expect.add_op(Op::Const(0, PrimitiveValue::Integer(42)));
 
-        println!("{:?}", actual);
+        let code = store_code_block(Builder::build(&actual).unwrap());
+        let result = eval(code);
 
-        panic!("{:?}", Builder::build(&actual));
-
-        assert_eq!(actual, expect);
+        assert!(if let PrimitiveValue::CodeBlock(_) = result {
+            true
+        } else {
+            false
+        });
     }
 
     #[test]
@@ -395,7 +397,6 @@ mod tests {
     fn compile_expression_nested_let() {
         use AtomicExpression::*;
         use ComplexExpression::*;
-        use PrimitiveFunction::*;
 
         let done = Block::new();
         done.terminate();
