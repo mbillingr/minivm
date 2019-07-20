@@ -32,6 +32,125 @@ pub enum PrimitiveFunction {
     Mul,
 }
 
+impl From<AtomicExpression> for ComplexExpression {
+    fn from(ax: AtomicExpression) -> Self {
+        ComplexExpression::Atomic(ax)
+    }
+}
+
+impl From<AtomicExpression> for Expression {
+    fn from(ax: AtomicExpression) -> Self {
+        Expression::Atomic(ax)
+    }
+}
+
+impl From<ComplexExpression> for Expression {
+    fn from(cx: ComplexExpression) -> Self {
+        Expression::Complex(cx)
+    }
+}
+
+impl From<AtomicExpression> for Box<Expression> {
+    fn from(ax: AtomicExpression) -> Self {
+        Box::new(Expression::Atomic(ax))
+    }
+}
+
+impl From<ComplexExpression> for Box<Expression> {
+    fn from(cx: ComplexExpression) -> Self {
+        Box::new(Expression::Complex(cx))
+    }
+}
+
+const INDENT: usize = 2;
+
+trait PrettyPrint {
+    fn to_pretty_string(&self, indent: usize) -> String;
+
+    fn println(&self) {
+        println!("{}", self.to_pretty_string(0));
+    }
+}
+
+impl PrettyPrint for AtomicExpression {
+    fn to_pretty_string(&self, indent: usize) -> String {
+        match self {
+            AtomicExpression::Undefined => format!("undefined"),
+            AtomicExpression::Nil => format!("'()"),
+            AtomicExpression::Variable(v) => v.clone(),
+            AtomicExpression::Integer(i) => format!("{}", i),
+            AtomicExpression::Lambda(params, body) => format!(
+                "(lambda ({})\n{}{})",
+                params.join(" "),
+                " ".repeat(indent + INDENT),
+                body.to_pretty_string(indent + INDENT)
+            ),
+        }
+    }
+}
+
+impl PrettyPrint for Expression {
+    fn to_pretty_string(&self, indent: usize) -> String {
+        match self {
+            Expression::Atomic(ax) => ax.to_pretty_string(indent),
+            Expression::Complex(cx) => cx.to_pretty_string(indent),
+            Expression::Let(var, def, body) => format!(
+                "(let {} {}\n{}{})",
+                var,
+                def.to_pretty_string(indent + 6 + var.len()),
+                " ".repeat(indent + INDENT),
+                body.to_pretty_string(indent + INDENT)
+            ),
+        }
+    }
+}
+
+impl PrettyPrint for ComplexExpression {
+    fn to_pretty_string(&self, indent: usize) -> String {
+        fn print_apply(argstrs: Vec<String>, indent: usize) -> String {
+            if argstrs.iter().any(|s| s.contains('\n')) {
+                let argstrs: Vec<_> = argstrs
+                    .into_iter()
+                    .map(|s| s.replace("\n", &("\n".to_string() + &" ".repeat(indent + 1))))
+                    .collect();
+                format!(
+                    "({})",
+                    argstrs.join(&("\n".to_string() + &" ".repeat(indent + 1)))
+                )
+            } else {
+                format!("({})", argstrs.join(" "))
+            }
+        }
+
+        match self {
+            ComplexExpression::Apply(func, args) => print_apply(
+                std::iter::once(func)
+                    .chain(args)
+                    .map(|a| a.to_pretty_string(0))
+                    .collect(),
+                indent,
+            ),
+            ComplexExpression::ApplyPrimitive(op, args) => print_apply(
+                std::iter::once(op.to_pretty_string(0))
+                    .chain(args.iter().map(|a| a.to_pretty_string(0)))
+                    .collect(),
+                indent,
+            ),
+            ComplexExpression::Atomic(ax) => ax.to_pretty_string(indent),
+            _ => format!("<Complex>"),
+        }
+    }
+}
+
+impl PrettyPrint for PrimitiveFunction {
+    fn to_pretty_string(&self, indent: usize) -> String {
+        match self {
+            PrimitiveFunction::Add => format!("+"),
+            PrimitiveFunction::Mul => format!("*"),
+        }
+    }
+}
+
 pub struct Compiler {
     variables_in_registers: Vec<String>,
     total_registers_used: usize,
@@ -236,6 +355,47 @@ mod tests {
     use crate::memory::store_code_block;
     use crate::virtual_machine::eval;
     use crate::virtual_machine::Operand;
+
+    #[test]
+    fn pretty_print() {
+        let prog = Expression::Let(
+            "func".into(),
+            AtomicExpression::Lambda(
+                vec!["x".to_string()],
+                Box::new(Expression::Complex(ComplexExpression::ApplyPrimitive(
+                    PrimitiveFunction::Mul,
+                    vec![
+                        AtomicExpression::Variable("x".to_string()),
+                        AtomicExpression::Lambda(
+                            vec!["x".to_string()],
+                            Box::new(Expression::Complex(ComplexExpression::ApplyPrimitive(
+                                PrimitiveFunction::Mul,
+                                vec![
+                                    AtomicExpression::Variable("x".to_string()),
+                                    AtomicExpression::Variable("x".to_string()),
+                                ],
+                            ))),
+                        ),
+                    ],
+                ))),
+            )
+            .into(),
+            ComplexExpression::Apply(
+                AtomicExpression::Variable("func".into()),
+                vec![AtomicExpression::Integer(42)],
+            )
+            .into(),
+        );
+
+        let expected = "(let func (lambda (x)
+            (*
+             x
+             (lambda (x)
+               (* x x))))
+  (func 42))";
+
+        assert_eq!(prog.to_pretty_string(0), expected);
+    }
 
     #[test]
     fn test_linkage_none() {
