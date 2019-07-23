@@ -15,21 +15,21 @@ pub enum Value {
 ///
 /// Semantics
 /// ---------
-///     - `Undefined` is used as a placeholder during code transformations. It should
-///       never occur in the final result.
-///     - `Primop(op, args, var, cont)` apply primitive operation `op` to `args` and
-///       bind the result to variable `var` in scope of the continuation `cont`.
-///     - `Apply(fnc, args)` apply function or closure `fnc` to args. This must always
-///       happen in tail position; the function is expected to never return. If the
-///       function takes a continuation it is passed as an ordinary argument.
-///     - `Fix(funcdefs, cont)` defines a set of mutually recursive functions (these
-///       functions can share a closure after closure conversion). The functions are
-///       bound in the scope of the body continuation `cont`.
-///     - `Record(values, var, cont)` allocates a new record containing `values` and
-///       binds the record to `var` in `cont`.
-///     - `Offset(idx, rec, var, cont)` creates a view into the record `rec` at offset
-///       `idx`. The view behaves just like a normal record.
-///     - `Select(idx, rec, var, cont)` fetch entry at index `idx` from `rec`.
+///   - `Undefined` is used as a placeholder during code transformations. It should
+///     never occur in the final result.
+///   - `Primop(op, args, var, cont)` apply primitive operation `op` to `args` and
+///     bind the result to variable `var` in scope of the continuation `cont`.
+///   - `Apply(fnc, args)` apply function or closure `fnc` to args. This must always
+///     happen in tail position; the function is expected to never return. If the
+///     function takes a continuation it is passed as an ordinary argument.
+///   - `Fix(funcdefs, cont)` defines a set of mutually recursive functions (these
+///     functions can share a closure after closure conversion). The functions are
+///     bound in the scope of the body continuation `cont`.
+///   - `Record(values, var, cont)` allocates a new record containing `values` and
+///     binds the record to `var` in `cont`.
+///   - `Offset(idx, rec, var, cont)` creates a view into the record `rec` at offset
+///     `idx`. The view behaves just like a normal record.
+///   - `Select(idx, rec, var, cont)` fetch entry at index `idx` from `rec`.
 #[derive(Debug, Clone)]
 pub enum Cexp {
     Undefined,
