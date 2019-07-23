@@ -1,0 +1,153 @@
+
+// 7.1.1 Lexical structure
+
+WHITESPACE = _{ whitespace }  // use implicit whitespace feature of the pest parser
+
+token = { identifier | boolean | number | character | string | "(" | ")" | "#(" | "#u8(" | "'" | "`" | "," | ",@" | "." }
+delimiter = { whitespace | vertical_line | "(" | ")" | "\"" | ";" }
+intraline_whitespace = { " " | "\t" }
+whitespace = { intraline_whitespace | line_ending }
+vertical_line = _{ "|" }
+line_ending = { NEWLINE }
+empty = { "" }
+
+comment = { (";" ~ (!line_ending ~ ANY)*) | nested_comment | ("#;" ~ intertoken_space ~ datum) }
+nested_comment = { "#|" ~ comment_text ~ comment_cont* ~ "|#" }
+comment_text = { (!("#|" | "|#") ~ ANY)+ }
+comment_cont = { nested_comment | comment_text }
+
+directive = { "#!fold-case" | "#!no-fold-case" }
+atmosphere = { whitespace | comment | directive}
+intertoken_space = { atmosphere* }
+
+identifier = _{ normal_identifier | (vertical_line ~ delimited_identifier ~ vertical_line) | peculiar_identifier }
+normal_identifier =  @{ initial ~ subsequent* }
+delimited_identifier = { symbol_element* }
+initial = _{ letter | special_initial }
+letter = _{ ASCII_ALPHA }
+special_initial = _{ "!" | "$" | "%" | "&" | "*" | "/" | ":" | "<" | "=" | ">" | "?" | "@" | "^" | "_" | "~" }
+subsequent = _{ initial | digit | special_subsequent }
+digit = _{ ASCII_DIGIT }
+hex_digit = _{ digit | "a" | "b" | "c" | "d" | "e" | "f" }
+explicit_sign = _{ "+" | "-" }
+special_subsequent = _{ explicit_sign | "." | "@" }
+inline_hex_escape = { "\\x" ~ hex_scalar_value ~ ";" }
+hex_scalar_value = { hex_digit+ }
+mnemonic_escape = _{ "\\a" | "\\b" | "\\t" | "\\n" | "\\r" }
+peculiar_identifier = @{ (explicit_sign ~ sign_subsequent ~ subsequent*)
+                    | (explicit_sign ~ "." ~ dot_subsequent ~ subsequent*)
+                    | ("." ~ dot_subsequent ~ subsequent*)
+                    | explicit_sign }
+dot_subsequent = _{ sign_subsequent | "." }
+sign_subsequent = _{ initial | explicit_sign | "@" }
+symbol_element = _{ inline_hex_escape | mnemonic_escape | "\\|" | (!(vertical_line | "\\") ~ ANY) }
+
+boolean = { "#true" | "#false" | "#t" | "#f" }
+
+character = { ("#\\" ~ ANY) | ("#\\" ~ character_name) | ("#\\x" ~ hex_scalar_value) }
+character_name = { "alarm" | "backspace" | "delete" | "escape" | "newline" | "null" | "return" | "space" | "tab" }
+
+string = _{ "\"" ~ string_content ~ "\"" }
+string_content = { string_element* }
+string_element = _{ mnemonic_escape | "\\\"" | "\\\\" | "\\|" | inline_hex_escape
+               | ("\\" ~ intraline_whitespace* ~ line_ending ~ intraline_whitespace*)
+               | (!("\"" | "\\") ~ ANY) }
+
+bytevector = { "#u8(" ~ byte* ~ ")" }
+byte = { number }  // the specification says any exact integer, but I guess we can catch this at a later stage
+
+
+infnan = { "+inf.0" | "-inf.0" | "+nan.0" | "-nan.0" }
+suffix = { (exponent_marker ~ sign ~ digit_10+) | "" }
+exponent_marker = { "e" }
+sign = { "+" | "-" | "" }
+exactness = _{ inexact | exact | empty }
+exact = { "#e" }
+inexact = { "#i" }
+radix_2 = _{ "#b" }
+radix_8 = _{ "#o" }
+radix_10 = _{ "#d" }
+radix_16 = _{ "#x" }
+digit_2 = _{ ASCII_BIN_DIGIT }
+digit_8 = _{ ASCII_OCT_DIGIT }
+digit_10 = _{ ASCII_DIGIT }
+digit_16 = _{ ASCII_HEX_DIGIT }
+number = ${ num_2 | num_8 | num_10 | num_16 }  // number is atomic - no implicit whitespace between components
+
+num_2 = { prefix_2 ~ complex_2 }
+complex_2 = @{ (real_2 ~ "@" ~ real_2)
+          | (real_2 ~ "+" ~ ureal_2 ~ "i")
+          | (real_2 ~ "-" ~ ureal_2 ~ "i")
+          | (real_2 ~ "+" ~ "i")
+          | (real_2 ~ infnan ~ "i")
+          | ("+" ~ ureal_2 ~ "i")
+          | ("-" ~ ureal_2 ~ "i")
+          | (infnan ~ "i")
+          | real_2
+          | ("+" ~ "i") | ("-" ~ "i") }
+real_2 = { (sign ~ ureal_2) | infnan }
+ureal_2 = { (uinteger_2 ~ "/" ~ uinteger_2) | uinteger_2 }
+uinteger_2 = { digit_2+ }
+prefix_2 = _{ (radix_2 ~ exactness) | (exactness ~ radix_2) }
+
+num_8 = { prefix_8 ~ complex_8 }
+complex_8 = @{ (real_8 ~ "@" ~ real_8)
+          | (real_8 ~ "+" ~ ureal_8 ~ "i")
+          | (real_8 ~ "-" ~ ureal_8 ~ "i")
+          | (real_8 ~ "+" ~ "i")
+          | (real_8 ~ infnan ~ "i")
+          | ("+" ~ ureal_8 ~ "i")
+          | ("-" ~ ureal_8 ~ "i")
+          | (infnan ~ "i")
+          | real_8
+          | ("+" ~ "i") | ("-" ~ "i")}
+real_8 = { (sign ~ ureal_8) | infnan }
+ureal_8 = { (uinteger_8 ~ "/" ~ uinteger_8) | uinteger_8 }
+uinteger_8 = { digit_8+ }
+prefix_8 = _{ (radix_8 ~ exactness) | (exactness ~ radix_8) }
+
+num_10 = { prefix_10 ~ complex_10 }
+complex_10 = @{ (real_10 ~ "@" ~ real_10)
+          | (real_10 ~ "+" ~ ureal_10 ~ "i")
+          | (real_10 ~ "-" ~ ureal_10 ~ "i")
+          | (real_10 ~ "+" ~ "i")
+          | (real_10 ~ infnan ~ "i")
+          | ("+" ~ ureal_10 ~ "i")
+          | ("-" ~ ureal_10 ~ "i")
+          | (infnan ~ "i")
+          | real_10
+          | ("+" ~ "i") | ("-" ~ "i") }
+real_10 = { (sign ~ ureal_10) | infnan }
+ureal_10 = { (uinteger_10 ~ "/" ~ uinteger_10) | decimal_10 | uinteger_10 }
+decimal_10 = { ("." ~ digit_10+ ~ suffix) | (digit_10+ ~ "." ~ digit_10* ~ suffix) | (uinteger_10 ~ suffix) }
+uinteger_10 = { digit_10+ }
+prefix_10 = _{ (radix_10 ~ exactness) | (exactness ~ radix_10) | radix_10 | exactness }
+
+num_16 = { prefix_16 ~ complex_16 }
+complex_16 = @{ (real_16 ~ "@" ~ real_16)
+          | (real_16 ~ "+" ~ ureal_16 ~ "i")
+          | (real_16 ~ "-" ~ ureal_16 ~ "i")
+          | (real_16 ~ "+" ~ "i")
+          | (real_16 ~ infnan ~ "i")
+          | ("+" ~ ureal_16 ~ "i")
+          | ("-" ~ ureal_16 ~ "i")
+          | (infnan ~ "i")
+          | real_16
+          | ("+" ~ "i") | ("-" ~ "i")}
+real_16 = { (sign ~ ureal_16) | infnan }
+ureal_16 = { (uinteger_16 ~ "/" ~ uinteger_16) | uinteger_16 }
+uinteger_16 = { digit_16+ }
+prefix_16 = _{ (radix_16 ~ exactness) | (exactness ~ radix_16) }
+
+// 7.1.2 External representation
+
+datum = _{ simple_datum | compound_datum | (label ~ "=" ~ datum) | label ~ "#" }
+simple_datum = _{ boolean | number | character | string | symbol | bytevector }
+symbol = { identifier }
+compound_datum = _{ list | vector | abbreviation }
+list = { ("(" ~ datum* ~ ")") | ("(" ~ datum+ ~ dot ~ datum ~ ")") }
+dot = { "." }
+abbreviation = { abbrev_prefix ~ datum }
+abbrev_prefix = { "'" | "`" | "," | ",@" }
+vector = { "#(" ~ datum* ~ ")" }
+label = { "#" ~ uinteger_10 }
