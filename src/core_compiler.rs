@@ -143,7 +143,7 @@ impl PrettyPrint for ComplexExpression {
 }
 
 impl PrettyPrint for PrimitiveFunction {
-    fn to_pretty_string(&self, indent: usize) -> String {
+    fn to_pretty_string(&self, _indent: usize) -> String {
         match self {
             PrimitiveFunction::Add => format!("+"),
             PrimitiveFunction::Mul => format!("*"),
