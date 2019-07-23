@@ -1,8 +1,9 @@
 use pest::error::{InputLocation, LineColLocation};
 use pest::{iterators::Pair, Parser, RuleType, Span};
 use pest_derive::*;
-use std::cell::RefCell;
+use std::cell::{RefCell, Ref};
 use std::marker::PhantomData;
+use std::borrow::Borrow;
 
 pub type Result<T, R> = std::result::Result<T, Error<R>>;
 
@@ -93,13 +94,6 @@ impl<'i> Object<'i> {
         }
     }
 
-    fn set_cdr(&self, item: Object<'i>) {
-        match self.kind {
-            ObjectKind::Pair(ref pair) => pair.borrow_mut().1 = item,
-            _ => panic!("Not a pair"),
-        }
-    }
-
     fn set_list_cdr(self, item: Object<'i>) -> Object<'i> {
         match self.kind {
             ObjectKind::Nil => item,
@@ -109,6 +103,34 @@ impl<'i> Object<'i> {
             }
             _ => panic!("Not a list"),
         }
+    }
+}
+
+impl<'i> std::fmt::Display for Object<'i> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match &self.kind {
+            ObjectKind::Nil => write!(f, "'()"),
+            ObjectKind::Exact(x) => write!(f, "{}", x),
+            ObjectKind::Inexact(x) => write!(f, "{}", x),
+            ObjectKind::Symbol(s) => write!(f, "{}", s),
+            ObjectKind::String(s) => write!(f, "{:?}", s),
+            ObjectKind::Pair(pair) => {
+                write!(f, "({}", (**pair).borrow().0)?;
+                write_list(&(**pair).borrow().1, f)?;
+                write!(f, ")")
+            }
+        }
+    }
+}
+
+fn write_list(x: &Object<'_>, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+    match x.kind {
+        ObjectKind::Pair(ref p) => {
+            write!(f, " {}", (**p).borrow().0)?;
+            write_list(&(**p).borrow().1, f)
+        }
+        ObjectKind::Nil => Ok(()),
+        _ => write!(f, " . {}", x)
     }
 }
 
@@ -238,18 +260,17 @@ mod tests {
     fn it_works() {
         println!("{:?}", R7rsGrammar::parse(Rule::prefix_10, "#i"));
         println!(
-            "{:?}",
+            "{}",
             parse_datum("(#e1 |x y| #i2 \"foo\" bar #b10 4.7 . 5)").unwrap()
         );
         println!(
-            "{:?}",
+            "{}",
             parse_datum("(define (two-sqr x) (* 2 x x))").unwrap()
         );
         println!(
-            "{:?}",
+            "{}",
             parse_datum("(define (two-sqr x) (* 2 x x))").unwrap()
         );
-        println!("{:?}", parse_datum("'(1 2 3)").unwrap());
-        panic!()
+        println!("{}", parse_datum("'(1 2 3)").unwrap());
     }
 }
