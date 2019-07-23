@@ -31,6 +31,20 @@ impl Op {
     }
 }
 
+/*#[derive(Debug, Clone)]
+struct TranslationUnit {
+    blocks: Vec<BlockData>,
+}
+
+impl TranslationUnit {
+    fn new_block(&mut self, n_args: usize) -> Block {
+        self.blocks.push(BlockData::new(n_args));
+        Block(self.blocks.len() - 1)
+    }
+}
+
+struct Block(usize);*/
+
 #[derive(Debug, Clone)]
 struct Block {
     data: Rc<RefCell<BlockData>>,
@@ -41,6 +55,10 @@ impl Block {
         Block {
             data: Rc::new(RefCell::new(BlockData::new(n_args))),
         }
+    }
+
+    fn id(&self) -> usize {
+        self.data.borrow().id()
     }
 
     fn n_args(&self) -> usize {
@@ -141,6 +159,10 @@ impl BlockData {
         }
     }
 
+    fn id(&self) -> usize {
+        self as *const Self as usize
+    }
+
     fn parameter(&mut self, idx: usize) -> Var {
         assert!(idx < self.n_args);
         Var(idx)
@@ -205,11 +227,15 @@ impl BlockData {
 }
 
 #[derive(Debug, PartialEq)]
-struct LivenessGraph {
-    edges: HashMap<Var, HashSet<Var>>,
+struct LivenessGraph<V>
+    where V: std::hash::Hash + Eq
+{
+    edges: HashMap<V, HashSet<V>>,
 }
 
-impl LivenessGraph {
+impl<V> LivenessGraph<V>
+    where V: std::hash::Hash + Eq
+{
     fn new() -> Self {
         LivenessGraph {
             edges: HashMap::new(),
@@ -217,36 +243,36 @@ impl LivenessGraph {
     }
 
     fn build(block: &Block) -> Self {
-        LivenessGraph::build_recursive(&block.data.borrow().ops).0
+        LivenessGraph::build_recursive(&block.data.borrow().ops, block).0
     }
 
-    fn build_recursive(ops: &[Op]) -> (Self, HashSet<Var>) {
+    fn build_recursive(ops: &[Op], block: &Block) -> (Self, HashSet<V>) {
         if ops[0].is_terminal() {
             match &ops[0] {
                 Op::Term(v) => {
                     let mut subgraph = LivenessGraph::new();
                     let mut liveset = HashSet::new();
                     liveset.insert(*v);
-                    subgraph.add_liveset(&liveset);
+                    subgraph.add_liveset(block, &liveset);
                     (subgraph, liveset)
                 }
                 Op::Branch(_block, args) => {
                     let mut subgraph = LivenessGraph::new();
                     let liveset = args.iter().cloned().collect();
-                    subgraph.add_liveset(&liveset);
+                    subgraph.add_liveset(block, &liveset);
                     (subgraph, liveset)
                 }
                 _ => unimplemented!("{:?}", ops[0]),
             }
         } else {
-            let (mut subgraph, liveset) = LivenessGraph::build_recursive(&ops[1..]);
+            let (mut subgraph, liveset) = LivenessGraph::build_recursive(&ops[1..], block);
             let liveset = LivenessGraph::adjust_liveset(liveset, &ops[0]);
-            subgraph.add_liveset(&liveset);
+            subgraph.add_liveset(block, &liveset);
             (subgraph, liveset)
         }
     }
 
-    fn adjust_liveset(mut set: HashSet<Var>, op: &Op) -> HashSet<Var> {
+    fn adjust_liveset(mut set: HashSet<V>, op: &Op) -> HashSet<V> {
         match op {
             Op::Const(x, _) => {
                 set.remove(x);
@@ -261,16 +287,16 @@ impl LivenessGraph {
         set
     }
 
-    fn add_liveset<'a>(&mut self, vars: impl Copy + IntoIterator<Item = &'a Var>) {
+    fn add_liveset<'a>(&mut self, block: &Block, vars: impl Copy + IntoIterator<Item = &'a Var>) {
         for v in vars {
             self.edges
-                .entry(*v)
+                .entry((*v, block.id()))
                 .or_default()
                 .extend(vars.into_iter().filter(|&w| w != v))
         }
     }
 
-    fn greedy_assign(&self, mut assignment: HashMap<Var, usize>) -> HashMap<Var, usize> {
+    fn greedy_assign(&self, mut assignment: HashMap<(Var, usize), usize>) -> HashMap<Var, usize> {
         let mut order: HashSet<_> = self.edges.keys().cloned().collect();
 
         while let Some(var) = self.next_var(&mut order, &assignment) {
@@ -295,9 +321,9 @@ impl LivenessGraph {
 
     fn next_var(
         &self,
-        unassigned: &mut HashSet<Var>,
-        assigned: &HashMap<Var, usize>,
-    ) -> Option<Var> {
+        unassigned: &mut HashSet<(Var, usize)>,
+        assigned: &HashMap<(Var, usize), usize>,
+    ) -> Option<(Var, usize)> {
         if unassigned.is_empty() {
             return None;
         }
@@ -503,5 +529,9 @@ mod tests {
         entry.branch(&done, &[a, b]);
         let c = done.parameter(1);
         done.terminate(c);
+
+        let lg = LivenessGraph::build(&entry);
+        lg.greedy_assign(HashMap::new());
+        panic!()
     }
 }
