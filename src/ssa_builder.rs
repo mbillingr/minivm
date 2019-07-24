@@ -492,7 +492,7 @@ fn next_node<K: std::hash::Hash + Eq + PartialOrd + Clone>(
         .2
         .unwrap();
 
-    debug_assert!(remaining_nodes.remove(&node));
+    remaining_nodes.remove(&node);
     Some(node)
 }
 
