@@ -2,536 +2,876 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-struct Var(usize);
+macro_rules! set {
+    ( ) => { ::std::collections::HashSet::new() };
+
+    ( $($key:expr),* ) => {set!($($key,)*)};
+
+    ( $($key:expr),+ ,) => {
+        {
+            let mut set = ::std::collections::HashSet::new();
+            $(set.insert($key);)*
+            set
+        }
+    };
+}
+
+macro_rules! map {
+    ( ) => { ::std::collections::HashMap::new() };
+
+    ( $( $key:expr => $val:expr),* ) => {map!($($key => $val,)*)};
+
+    ( $( $key:expr => $val:expr),+ , ) => {{
+        let mut map = ::std::collections::HashMap::new();
+        $(map.insert($key, $val);)*
+        map
+    }};
+}
+
+#[derive(Debug, Clone)]
+pub struct TranslationUnit<V> {
+    unit: Rc<RefCell<TransUnitData<V>>>,
+}
+
+#[derive(Debug)]
+pub struct Block<V> {
+    unit: WeakUnit<V>,
+    block: Rc<RefCell<BlockData<V>>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Var<V> {
+    unit: WeakUnit<V>,
+    block_id: BlockId,
+    name: VarName,
+}
+
+impl<V> TranslationUnit<V> {
+    pub fn new() -> Self {
+        TranslationUnit {
+            unit: Rc::new(RefCell::new(TransUnitData::new())),
+        }
+    }
+
+    pub fn new_block(&self) -> Block<V> {
+        let block = Block::new(self);
+        self.unit.borrow_mut().push_block(block.clone());
+        block
+    }
+
+    fn new_var_name(&mut self) -> VarName {
+        self.unit.borrow_mut().new_var_name()
+    }
+
+    pub fn verify(&self, entry_block: &Block<V>) {
+        let mut assigned_vars = HashSet::new();
+        entry_block.verify(&mut assigned_vars);
+    }
+
+    pub fn allocate_registers(&self, entry_block: &Block<V>) {
+        let liveness_graph = self.build_liveness_graph(entry_block);
+        let mut data = self.unit.borrow_mut();
+        let preassignment = std::mem::replace(&mut data.register_assignment, map![]);
+        data.register_assignment = greedy_coloring(&liveness_graph, preassignment);
+    }
+
+    fn build_liveness_graph(&self, entry_block: &Block<V>) -> HashMap<VarName, HashSet<VarName>> {
+        entry_block.build_liveness_graph().0
+    }
+}
+
+impl<V> Block<V> {
+    pub fn new(unit: &TranslationUnit<V>) -> Self {
+        Block {
+            unit: unit.into(),
+            block: Rc::new(RefCell::new(BlockData::new())),
+        }
+    }
+
+    pub fn id(&self) -> BlockId {
+        BlockId(self.block.as_ptr() as usize)
+    }
+
+    pub fn append_parameter(&self) -> Var<V> {
+        let var = self.new_var();
+        self.block.borrow_mut().append_parameter(var.name);
+        var
+    }
+
+    pub fn n_params(&self) -> usize {
+        self.block.borrow().params.len()
+    }
+
+    pub fn constant(&self, c: impl Into<V>) -> Var<V> {
+        let var = self.new_var();
+        self.block
+            .borrow_mut()
+            .append_op(Op::Const(var.name, c.into()));
+        var
+    }
+
+    pub fn add(&self, a: &Var<V>, b: &Var<V>) -> Var<V> {
+        let var = self.new_var();
+        self.block
+            .borrow_mut()
+            .append_op(Op::Add(var.name, a.name, b.name));
+        var
+    }
+
+    pub fn mul(&self, a: &Var<V>, b: &Var<V>) -> Var<V> {
+        let var = self.new_var();
+        self.block
+            .borrow_mut()
+            .append_op(Op::Mul(var.name, a.name, b.name));
+        var
+    }
+
+    pub fn terminate(&self, x: &Var<V>) {
+        self.block.borrow_mut().append_op(Op::Term(x.name));
+    }
+
+    pub fn branch(&self, target: &Block<V>, args: &[&Var<V>]) {
+        let arg_names = args.iter().map(|a| a.name).collect();
+        self.block
+            .borrow_mut()
+            .append_op(Op::Branch(target.clone(), arg_names));
+    }
+
+    pub fn branch_conditionally(
+        &self,
+        cond: &Var<V>,
+        then_block: &Block<V>,
+        then_args: &[&Var<V>],
+        else_block: &Block<V>,
+        else_args: &[&Var<V>],
+    ) {
+        let then_names = then_args.iter().map(|a| a.name).collect();
+        let else_names = else_args.iter().map(|a| a.name).collect();
+        self.block.borrow_mut().append_op(Op::CondBranch(
+            cond.name,
+            then_block.clone(),
+            then_names,
+            else_block.clone(),
+            else_names,
+        ));
+    }
+
+    fn new_var(&self) -> Var<V> {
+        let name = self.unit.upgrade().new_var_name();
+        Var::new(self.unit.clone(), self, name)
+    }
+
+    fn verify(&self, assigned_vars: &mut HashSet<VarName>) {
+        let block = self.block.borrow();
+        assert!(block.ops.last().map(Op::is_terminal).unwrap_or(true));
+        assigned_vars.extend(&block.params);
+        for op in &block.ops {
+            op.verify(assigned_vars);
+        }
+    }
+
+    fn build_liveness_graph(&self) -> (HashMap<VarName, HashSet<VarName>>, HashSet<VarName>) {
+        let block = self.block.borrow();
+
+        let mut liveset = set![];
+        let mut subgraph = map![];
+
+        for op in block.ops.iter().rev() {
+            let (g, l) = op.update_liveness_graph((subgraph, liveset));
+            liveset = l;
+            subgraph = g;
+            println!("{:?}: {:?}", self.id(), liveset);
+        }
+
+        for p in &block.params {
+            liveset.remove(p);
+        }
+
+        (subgraph, liveset)
+    }
+}
+
+impl<V> Clone for Block<V> {
+    fn clone(&self) -> Self {
+        Block {
+            unit: self.unit.clone(),
+            block: self.block.clone(),
+        }
+    }
+}
+
+impl<V> Var<V> {
+    fn new(unit: WeakUnit<V>, block: &Block<V>, name: VarName) -> Self {
+        Var {
+            unit,
+            block_id: block.id(),
+            name,
+        }
+    }
+}
 
 #[derive(Debug, Copy, Clone, PartialEq)]
-enum ConstValue {
-    Integer(i64),
+pub struct BlockId(usize);
+
+#[derive(Debug)]
+struct WeakUnit<V> {
+    data: Weak<RefCell<TransUnitData<V>>>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-enum Op {
-    Const(Var, ConstValue),
-    Add(Var, Var, Var),
-    Mul(Var, Var, Var),
-    Term(Var),
-    Branch(Block, Vec<Var>),
-    CondBranch(Var, Block, Vec<Var>, Block, Vec<Var>),
+impl<V> Clone for WeakUnit<V> {
+    fn clone(&self) -> Self {
+        WeakUnit {
+            data: self.data.clone(),
+        }
+    }
 }
 
-impl Op {
+impl<V> From<&TranslationUnit<V>> for WeakUnit<V> {
+    fn from(tu: &TranslationUnit<V>) -> Self {
+        WeakUnit {
+            data: Rc::downgrade(&tu.unit),
+        }
+    }
+}
+
+impl<V> WeakUnit<V> {
+    fn upgrade(&self) -> TranslationUnit<V> {
+        TranslationUnit {
+            unit: self
+                .data
+                .upgrade()
+                .expect("Translation unit has been deallocated"),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct TransUnitData<V> {
+    blocks: Vec<Block<V>>,
+    next_var: VarName,
+    register_assignment: HashMap<VarName, usize>,
+}
+
+impl<V> TransUnitData<V> {
+    fn new() -> Self {
+        TransUnitData {
+            blocks: vec![],
+            next_var: VarName::default(),
+            register_assignment: HashMap::new(),
+        }
+    }
+
+    fn push_block(&mut self, block: Block<V>) {
+        self.blocks.push(block)
+    }
+
+    fn new_var_name(&mut self) -> VarName {
+        self.next_var.new_name()
+    }
+}
+
+#[derive(Debug)]
+struct BlockData<V> {
+    ops: Vec<Op<V>>,
+    params: Vec<VarName>,
+}
+
+impl<V> BlockData<V> {
+    fn new() -> Self {
+        BlockData {
+            ops: vec![],
+            params: vec![],
+        }
+    }
+
+    fn append_parameter(&mut self, varname: VarName) {
+        self.params.push(varname);
+    }
+
+    fn append_op(&mut self, op: Op<V>) {
+        assert!(self.ops.last().map(Op::is_nonterminal).unwrap_or(true));
+        self.ops.push(op);
+    }
+}
+
+#[derive(Debug, Copy, Clone, Default, PartialOrd, PartialEq, Eq, Hash)]
+struct VarName(usize);
+
+impl VarName {
+    fn new_name(&mut self) -> Self {
+        let old_name = *self;
+        self.0 += 1;
+        old_name
+    }
+}
+
+#[derive(Debug)]
+enum Op<V> {
+    Const(VarName, V),
+    Add(VarName, VarName, VarName),
+    Mul(VarName, VarName, VarName),
+
+    Term(VarName),
+    Branch(Block<V>, Vec<VarName>),
+    CondBranch(VarName, Block<V>, Vec<VarName>, Block<V>, Vec<VarName>),
+}
+
+impl<V> Op<V> {
     fn is_terminal(&self) -> bool {
         match self {
-            Op::Term(_) => true,
-            Op::Branch(_, _) => true,
-            Op::CondBranch(_, _, _, _, _) => true,
+            Op::Term(_) | Op::Branch(_, _) | Op::CondBranch(_, _, _, _, _) => true,
+            _ => false,
+        }
+    }
+
+    fn is_nonterminal(&self) -> bool {
+        !self.is_terminal()
+    }
+
+    fn verify(&self, assigned_vars: &mut HashSet<VarName>) {
+        match self {
+            Op::Const(v, _) => {
+                assigned_vars.insert(*v);
+            }
+            Op::Add(z, a, b) | Op::Mul(z, a, b) => {
+                assert!(assigned_vars.contains(a));
+                assert!(assigned_vars.contains(b));
+                assigned_vars.insert(*z);
+            }
+            Op::Term(a) => assert!(assigned_vars.contains(a)),
+            Op::Branch(block, args) => {
+                for a in args {
+                    assert!(assigned_vars.contains(a));
+                }
+                assert_eq!(args.len(), block.n_params());
+                block.verify(assigned_vars)
+            }
+            Op::CondBranch(cond, then_block, then_args, else_block, else_args) => {
+                assert!(assigned_vars.contains(cond));
+                for a in then_args {
+                    assert!(assigned_vars.contains(a));
+                }
+                for a in else_args {
+                    assert!(assigned_vars.contains(a));
+                }
+                then_block.verify(&mut assigned_vars.clone());
+                else_block.verify(assigned_vars);
+            }
+        }
+    }
+
+    fn update_liveness_graph(
+        &self,
+        (mut graph, mut liveset): (HashMap<VarName, HashSet<VarName>>, HashSet<VarName>),
+    ) -> (HashMap<VarName, HashSet<VarName>>, HashSet<VarName>) {
+        match self {
+            Op::Const(z, _) => {
+                liveset.remove(z);
+            }
+            Op::Add(z, a, b) | Op::Mul(z, a, b) => {
+                liveset.remove(z);
+                liveset.insert(*a);
+                liveset.insert(*b);
+            }
+            Op::Term(a) => {
+                liveset.insert(*a);
+            }
+            Op::Branch(blk, args) => {
+                let (g, l) = blk.build_liveness_graph();
+                graph = g;
+                liveset = l;
+                liveset.extend(args);
+            }
+            Op::CondBranch(cond, blk1, args1, blk2, args2) => {
+                let (g1, l1) = blk1.build_liveness_graph();
+                let (g2, l2) = blk2.build_liveness_graph();
+                liveset = l1.union(&l2).cloned().collect();
+                graph = join_edges(g1, g2);
+                liveset.insert(*cond);
+                liveset.extend(args1);
+                liveset.extend(args2);
+            }
+        }
+
+        for a in &liveset {
+            graph
+                .entry(*a)
+                .or_default()
+                .extend(liveset.iter().filter(|&b| a != b));
+        }
+
+        (graph, liveset)
+    }
+}
+
+impl<V> PartialEq for Op<V> {
+    fn eq(&self, rhs: &Self) -> bool {
+        match (self, rhs) {
+            (Op::Const(z1, _), Op::Const(z2, _)) => z1 == z2,
+            (Op::Add(z1, a1, b1), Op::Add(z2, a2, b2))
+            | (Op::Mul(z1, a1, b1), Op::Mul(z2, a2, b2)) => (z1, a1, b1) == (z2, a2, b2),
+            (Op::Term(z1), Op::Term(z2)) => z1 == z2,
+            (Op::Branch(bl1, args1), Op::Branch(bl2, args2)) => {
+                bl1.id() == bl2.id() && args1 == args2
+            }
+            (Op::CondBranch(co1, a1, b1, c1, d1), Op::CondBranch(co2, a2, b2, c2, d2)) => {
+                co1 == co2 && a1.id() == a2.id() && b1 == b2 && c1.id() == c2.id() && d1 == d2
+            }
             _ => false,
         }
     }
 }
 
-/*#[derive(Debug, Clone)]
-struct TranslationUnit {
-    blocks: Vec<BlockData>,
+fn join_edges<K: std::hash::Hash + Eq>(
+    mut g1: HashMap<K, HashSet<K>>,
+    g2: HashMap<K, HashSet<K>>,
+) -> HashMap<K, HashSet<K>> {
+    for (node, neighbors) in g2 {
+        g1.entry(node).or_default().extend(neighbors)
+    }
+    g1
 }
 
-impl TranslationUnit {
-    fn new_block(&mut self, n_args: usize) -> Block {
-        self.blocks.push(BlockData::new(n_args));
-        Block(self.blocks.len() - 1)
-    }
-}
+fn greedy_coloring<K: std::hash::Hash + Eq + PartialOrd + Clone>(
+    graph: &HashMap<K, HashSet<K>>,
+    mut assignment: HashMap<K, usize>,
+) -> HashMap<K, usize> {
+    let mut remaining_nodes: HashSet<_> = graph.keys().cloned().collect();
 
-struct Block(usize);*/
+    while let Some(node) = next_node(graph, &mut remaining_nodes, &assignment) {
+        let neighbors = &graph[&node];
 
-#[derive(Debug, Clone)]
-struct Block {
-    data: Rc<RefCell<BlockData>>,
-}
-
-impl Block {
-    fn new(n_args: usize) -> Self {
-        Block {
-            data: Rc::new(RefCell::new(BlockData::new(n_args))),
-        }
-    }
-
-    fn id(&self) -> usize {
-        self.data.borrow().id()
-    }
-
-    fn n_args(&self) -> usize {
-        self.data.borrow().n_args
-    }
-
-    fn parameter(&self, idx: usize) -> Var {
-        self.data.borrow_mut().parameter(idx)
-    }
-
-    fn terminate(&self, x: Var) {
-        self.data.borrow_mut().terminate(x)
-    }
-
-    fn constant(&self, i: i64) -> Var {
-        self.data.borrow_mut().constant(i)
-    }
-
-    fn add(&self, a: Var, b: Var) -> Var {
-        self.data.borrow_mut().add(a, b)
-    }
-
-    fn mul(&self, a: Var, b: Var) -> Var {
-        self.data.borrow_mut().mul(a, b)
-    }
-
-    fn branch(&self, to: &Block, args: &[Var]) {
-        to.data
-            .borrow_mut()
-            .preceding_blocks
-            .push(Rc::downgrade(&self.data));
-        self.data.borrow_mut().branch(to.clone(), args.to_vec())
-    }
-
-    fn cond_branch(
-        &self,
-        cond: Var,
-        then_block: &Block,
-        then_args: &[Var],
-        else_block: &Block,
-        else_args: &[Var],
-    ) {
-        then_block
-            .data
-            .borrow_mut()
-            .preceding_blocks
-            .push(Rc::downgrade(&self.data));
-        else_block
-            .data
-            .borrow_mut()
-            .preceding_blocks
-            .push(Rc::downgrade(&self.data));
-        self.data.borrow_mut().cond_branch(
-            cond,
-            then_block.clone(),
-            then_args.to_vec(),
-            else_block.clone(),
-            else_args.to_vec(),
-        )
-    }
-}
-
-impl std::cmp::PartialEq for Block {
-    fn eq(&self, other: &Self) -> bool {
-        Rc::ptr_eq(&self.data, &other.data)
-    }
-}
-
-#[derive(Debug, Clone)]
-struct BlockData {
-    n_args: usize,
-    next_var: usize,
-    ops: Vec<Op>,
-    preceding_blocks: Vec<Weak<RefCell<BlockData>>>,
-}
-
-impl PartialEq for BlockData {
-    fn eq(&self, other: &Self) -> bool {
-        self.n_args == other.n_args
-            && self.next_var == other.next_var
-            && self.ops == other.ops
-            && self.preceding_blocks.len() == other.preceding_blocks.len()
-            && self
-                .preceding_blocks
-                .iter()
-                .zip(other.preceding_blocks.iter())
-                .all(|(a, b)| Rc::ptr_eq(&a.upgrade().unwrap(), &b.upgrade().unwrap()))
-    }
-}
-
-impl BlockData {
-    fn new(n_args: usize) -> Self {
-        BlockData {
-            n_args,
-            next_var: n_args,
-            ops: vec![],
-            preceding_blocks: vec![],
-        }
-    }
-
-    fn id(&self) -> usize {
-        self as *const Self as usize
-    }
-
-    fn parameter(&mut self, idx: usize) -> Var {
-        assert!(idx < self.n_args);
-        Var(idx)
-    }
-
-    fn constant(&mut self, i: i64) -> Var {
-        let result = self.new_var();
-        self.push_op(Op::Const(result, ConstValue::Integer(i)));
-        result
-    }
-
-    fn add(&mut self, a: Var, b: Var) -> Var {
-        let result = self.new_var();
-        self.push_op(Op::Add(result, a, b));
-        result
-    }
-
-    fn mul(&mut self, a: Var, b: Var) -> Var {
-        let result = self.new_var();
-        self.push_op(Op::Mul(result, a, b));
-        result
-    }
-
-    fn terminate(&mut self, x: Var) {
-        self.push_op(Op::Term(x))
-    }
-
-    fn branch(&mut self, to: Block, args: Vec<Var>) {
-        assert_eq!(args.len(), to.n_args());
-        self.push_op(Op::Branch(to, args));
-    }
-
-    fn cond_branch(
-        &mut self,
-        cond: Var,
-        then_block: Block,
-        then_args: Vec<Var>,
-        else_block: Block,
-        else_args: Vec<Var>,
-    ) {
-        assert_eq!(then_args.len(), then_block.n_args());
-        assert_eq!(else_args.len(), else_block.n_args());
-        self.push_op(Op::CondBranch(
-            cond, then_block, then_args, else_block, else_args,
-        ));
-    }
-
-    fn new_var(&mut self) -> Var {
-        let i = self.next_var;
-        self.next_var += 1;
-        Var(i)
-    }
-
-    fn push_op(&mut self, op: Op) {
-        if let Some(o) = self.ops.last() {
-            if o.is_terminal() {
-                panic!("Cannot add operations after terminal instruction")
-            }
-        }
-        self.ops.push(op);
-    }
-}
-
-#[derive(Debug, PartialEq)]
-struct LivenessGraph<V>
-    where V: std::hash::Hash + Eq
-{
-    edges: HashMap<V, HashSet<V>>,
-}
-
-impl<V> LivenessGraph<V>
-    where V: std::hash::Hash + Eq
-{
-    fn new() -> Self {
-        LivenessGraph {
-            edges: HashMap::new(),
-        }
-    }
-
-    fn build(block: &Block) -> Self {
-        LivenessGraph::build_recursive(&block.data.borrow().ops, block).0
-    }
-
-    fn build_recursive(ops: &[Op], block: &Block) -> (Self, HashSet<V>) {
-        if ops[0].is_terminal() {
-            match &ops[0] {
-                Op::Term(v) => {
-                    let mut subgraph = LivenessGraph::new();
-                    let mut liveset = HashSet::new();
-                    liveset.insert(*v);
-                    subgraph.add_liveset(block, &liveset);
-                    (subgraph, liveset)
-                }
-                Op::Branch(_block, args) => {
-                    let mut subgraph = LivenessGraph::new();
-                    let liveset = args.iter().cloned().collect();
-                    subgraph.add_liveset(block, &liveset);
-                    (subgraph, liveset)
-                }
-                _ => unimplemented!("{:?}", ops[0]),
-            }
-        } else {
-            let (mut subgraph, liveset) = LivenessGraph::build_recursive(&ops[1..], block);
-            let liveset = LivenessGraph::adjust_liveset(liveset, &ops[0]);
-            subgraph.add_liveset(block, &liveset);
-            (subgraph, liveset)
-        }
-    }
-
-    fn adjust_liveset(mut set: HashSet<V>, op: &Op) -> HashSet<V> {
-        match op {
-            Op::Const(x, _) => {
-                set.remove(x);
-            }
-            Op::Add(c, a, b) | Op::Mul(c, a, b) => {
-                set.remove(c);
-                set.insert(*a);
-                set.insert(*b);
-            }
-            _ => unimplemented!("{:?}", op),
-        }
-        set
-    }
-
-    fn add_liveset<'a>(&mut self, block: &Block, vars: impl Copy + IntoIterator<Item = &'a Var>) {
-        for v in vars {
-            self.edges
-                .entry((*v, block.id()))
-                .or_default()
-                .extend(vars.into_iter().filter(|&w| w != v))
-        }
-    }
-
-    fn greedy_assign(&self, mut assignment: HashMap<(Var, usize), usize>) -> HashMap<Var, usize> {
-        let mut order: HashSet<_> = self.edges.keys().cloned().collect();
-
-        while let Some(var) = self.next_var(&mut order, &assignment) {
-            let neighbors = &self.edges[&var];
-
-            let mut neighbor_registers: Vec<_> =
-                neighbors.iter().filter_map(|r| assignment.get(r)).collect();
-            neighbor_registers.sort();
-            let n = neighbor_registers.len();
-
-            let register = neighbor_registers
-                .into_iter()
-                .enumerate()
-                .find(|(i, r)| i < r)
-                .map(|(i, _)| i)
-                .unwrap_or(n);
-
-            assignment.insert(var, register);
-        }
-        assignment
-    }
-
-    fn next_var(
-        &self,
-        unassigned: &mut HashSet<(Var, usize)>,
-        assigned: &HashMap<(Var, usize), usize>,
-    ) -> Option<(Var, usize)> {
-        if unassigned.is_empty() {
-            return None;
-        }
-
-        let var = unassigned
+        let neighbor_colors: Vec<_> = neighbors
             .iter()
-            .map(|v| {
-                let neighbors = &self.edges[v];
-                let distinct_registers: HashSet<_> =
-                    neighbors.iter().filter_map(|n| assigned.get(n)).collect();
-                let sub_degree = neighbors
-                    .iter()
-                    .filter(|n| !assigned.contains_key(n))
-                    .count();
-                (distinct_registers.len(), sub_degree, *v)
-            })
-            .fold((0, 0, None), |best, (n_reg, sub_degree, v)| {
-                match best.2 {
-                    Some(bv)
-                        if best.2.is_none()
-                            || n_reg > best.0
-                            || n_reg == best.0 && sub_degree > best.1
-                            || n_reg == best.0 && sub_degree == best.1 && v > bv =>
-                    {
-                        (n_reg, sub_degree, Some(v))
-                    }
-                    None => (n_reg, sub_degree, Some(v)),
-                    _ => best,
-                }
-            })
-            .2
-            .unwrap();
+            .filter_map(|n| assignment.get(n))
+            .cloned()
+            .collect();
 
-        assert!(unassigned.remove(&var));
-        Some(var)
+        assignment.insert(node, find_smallest_color(neighbor_colors));
     }
+
+    assignment
+}
+
+fn next_node<K: std::hash::Hash + Eq + PartialOrd + Clone>(
+    graph: &HashMap<K, HashSet<K>>,
+    remaining_nodes: &mut HashSet<K>,
+    assignment: &HashMap<K, usize>,
+) -> Option<K> {
+    if remaining_nodes.is_empty() {
+        return None;
+    }
+
+    let node = remaining_nodes
+        .iter()
+        .cloned()
+        .map(|node| {
+            let neighbors = &graph[&node];
+            let distinct_colors: HashSet<_> =
+                neighbors.iter().filter_map(|n| assignment.get(n)).collect();
+            let unassigned_degree = neighbors
+                .iter()
+                .filter(|n| !assignment.contains_key(n))
+                .count();
+            (distinct_colors.len(), unassigned_degree, node)
+        })
+        .fold((0, 0, None), |best, (n_colors, sub_degree, node)| {
+            match best.2 {
+                Some(ref bv)
+                    if best.2.is_none()
+                        || n_colors > best.0
+                        || n_colors == best.0 && sub_degree > best.1
+                        || n_colors == best.0 && sub_degree == best.1 && node > *bv =>
+                {
+                    (n_colors, sub_degree, Some(node))
+                }
+                None => (n_colors, sub_degree, Some(node)),
+                _ => best,
+            }
+        })
+        .2
+        .unwrap();
+
+    debug_assert!(remaining_nodes.remove(&node));
+    Some(node)
+}
+
+fn find_smallest_color(mut neighbor_colors: Vec<usize>) -> usize {
+    let n_colors = neighbor_colors.len();
+    neighbor_colors.sort();
+    neighbor_colors
+        .into_iter()
+        .enumerate()
+        .find(|(i, r)| i < r)
+        .map(|(i, _)| i)
+        .unwrap_or(n_colors)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn basic_ssa() {
-        let block = Block::new(1);
-        let a = block.parameter(0);
-        let b = block.constant(2);
-        let a2 = block.mul(a, a);
-        let b2 = block.mul(b, b);
-        let c = block.add(a2, b2);
-        block.terminate(c);
+    impl<V> PartialEq<Vec<Op<V>>> for Block<V> {
+        fn eq(&self, rhs: &Vec<Op<V>>) -> bool {
+            self.block.borrow_mut().ops == *rhs
+        }
+    }
 
-        let d = block.data.borrow();
+    #[test]
+    fn create_blocks() {
+        let tu = TranslationUnit::<()>::new();
+        let entry = tu.new_block();
+        let exit = tu.new_block();
+        entry.terminate(&entry.constant(()));
+        exit.terminate(&exit.constant(()));
+
+        tu.verify(&entry);
+        assert_eq!(entry, vec![Op::Const(VarName(0), ()), Op::Term(VarName(0))]);
+        assert_eq!(exit, vec![Op::Const(VarName(1), ()), Op::Term(VarName(1))]);
+    }
+
+    #[test]
+    fn add_parameters() {
+        let tu = TranslationUnit::<i32>::new();
+        let entry = tu.new_block();
+        let x = entry.append_parameter();
+        let y = entry.append_parameter();
+        let k = entry.constant(2);
+        let z = entry.mul(&x, &y);
+        let z = entry.add(&z, &k);
+        entry.terminate(&z);
+
+        tu.verify(&entry);
         assert_eq!(
-            *d,
-            BlockData {
-                n_args: 1,
-                next_var: 5,
-                ops: vec![
-                    Op::Const(Var(1), ConstValue::Integer(2)),
-                    Op::Mul(Var(2), Var(0), Var(0)),
-                    Op::Mul(Var(3), Var(1), Var(1)),
-                    Op::Add(Var(4), Var(2), Var(3)),
-                    Op::Term(Var(4)),
-                ],
-                preceding_blocks: vec![]
-            }
-        )
+            entry,
+            vec![
+                Op::Const(VarName(2), 2),
+                Op::Mul(VarName(3), VarName(0), VarName(1)),
+                Op::Add(VarName(4), VarName(3), VarName(2)),
+                Op::Term(VarName(4))
+            ]
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn invalid_variable_usage() {
+        let tu = TranslationUnit::<()>::new();
+        let entry = tu.new_block();
+        let exit = tu.new_block();
+        let x = exit.append_parameter();
+        exit.terminate(&x);
+        entry.terminate(&x);
+        tu.verify(&entry);
     }
 
     #[test]
     fn branch() {
-        let entry = Block::new(1);
-        let done = Block::new(2);
-        let a = entry.parameter(0);
-        let b = entry.constant(42);
-        entry.branch(&done, &[a, b]);
-        let c = done.parameter(1);
-        done.terminate(c);
+        let tu = TranslationUnit::<()>::new();
+        let entry = tu.new_block();
+        let exit = tu.new_block();
+        let x = entry.append_parameter();
+        entry.branch(&exit, &[]);
+        exit.terminate(&x);
 
-        let e = entry.data.borrow();
-        assert_eq!(
-            *e,
-            BlockData {
-                n_args: 1,
-                next_var: 2,
-                ops: vec![
-                    Op::Const(Var(1), ConstValue::Integer(42)),
-                    Op::Branch(done.clone(), vec![Var(0), Var(1)])
-                ],
-                preceding_blocks: vec![]
-            }
-        );
+        tu.verify(&entry);
 
-        let d = done.data.borrow();
+        assert_eq!(exit, vec![Op::Term(VarName(0)),]);
+
+        assert_eq!(entry, vec![Op::Branch(exit, vec![]),]);
+    }
+
+    #[test]
+    fn branch_with_args() {
+        let tu = TranslationUnit::<()>::new();
+        let entry = tu.new_block();
+        let exit = tu.new_block();
+        let x = entry.append_parameter();
+        entry.branch(&exit, &[&x]);
+        let y = exit.append_parameter();
+        exit.terminate(&y);
+
+        tu.verify(&entry);
+
+        assert_eq!(exit, vec![Op::Term(VarName(1)),]);
+
+        assert_eq!(entry, vec![Op::Branch(exit, vec![VarName(0)]),]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn branch_with_missing_args() {
+        let tu = TranslationUnit::<()>::new();
+        let entry = tu.new_block();
+        let exit = tu.new_block();
+        entry.branch(&exit, &[]);
+        let y = exit.append_parameter();
+        exit.terminate(&y);
+        tu.verify(&entry);
+    }
+
+    #[test]
+    #[should_panic]
+    fn branch_with_too_many_args() {
+        let tu = TranslationUnit::<()>::new();
+        let entry = tu.new_block();
+        let exit = tu.new_block();
+        let x = entry.append_parameter();
+        entry.branch(&exit, &[&x]);
+        exit.terminate(&x);
+        tu.verify(&entry);
+    }
+
+    #[test]
+    fn conditional_branch() {
+        let tu = TranslationUnit::<()>::new();
+        let entry = tu.new_block();
+        let yes = tu.new_block();
+        let no = tu.new_block();
+        let c = entry.append_parameter();
+        entry.branch_conditionally(&c, &yes, &[], &no, &[]);
+        yes.terminate(&yes.constant(()));
+        no.terminate(&no.constant(()));
+
+        tu.verify(&entry);
+
+        assert_eq!(yes, vec![Op::Const(VarName(1), ()), Op::Term(VarName(1)),]);
+
+        assert_eq!(no, vec![Op::Const(VarName(2), ()), Op::Term(VarName(2)),]);
+
         assert_eq!(
-            *d,
-            BlockData {
-                n_args: 2,
-                next_var: 2,
-                ops: vec![Op::Term(Var(1))],
-                preceding_blocks: vec![Rc::downgrade(&entry.data)]
-            }
+            entry,
+            vec![Op::CondBranch(VarName(0), yes, vec![], no, vec![]),]
         );
     }
 
     #[test]
-    fn cond_branch() {
-        let entry = Block::new(2);
-        let yes = Block::new(1);
-        let no = Block::new(0);
-        entry.cond_branch(entry.parameter(0), &yes, &[entry.parameter(1)], &no, &[]);
-        yes.terminate(yes.parameter(0));
-        no.terminate(no.constant(42));
+    fn conditional_branch_with_args() {
+        let tu = TranslationUnit::<i64>::new();
+        let entry = tu.new_block();
+        let yes = tu.new_block();
+        let exit = tu.new_block();
+        let c = entry.append_parameter();
+        let x = entry.append_parameter();
+        entry.branch_conditionally(&c, &yes, &[&x], &exit, &[&x]);
+        let y = yes.append_parameter();
+        let y = yes.add(&y, &yes.constant(100));
+        yes.branch(&exit, &[&y]);
+        let z = exit.append_parameter();
+        exit.terminate(&z);
 
-        let e = entry.data.borrow();
+        tu.verify(&entry);
+
+        assert_eq!(exit, vec![Op::Term(VarName(5)),]);
+
         assert_eq!(
-            *e,
-            BlockData {
-                n_args: 2,
-                next_var: 2,
-                ops: vec![Op::CondBranch(
-                    Var(0),
-                    yes.clone(),
-                    vec![Var(1)],
-                    no.clone(),
-                    vec![]
-                )],
-                preceding_blocks: vec![]
-            }
+            yes,
+            vec![
+                Op::Const(VarName(3), 100),
+                Op::Add(VarName(4), VarName(2), VarName(3)),
+                Op::Branch(exit.clone(), vec![VarName(4)]),
+            ]
         );
 
-        let y = yes.data.borrow();
         assert_eq!(
-            *y,
-            BlockData {
-                n_args: 1,
-                next_var: 1,
-                ops: vec![Op::Term(Var(0))],
-                preceding_blocks: vec![Rc::downgrade(&entry.data)]
-            }
-        );
-
-        let n = no.data.borrow();
-        assert_eq!(
-            *n,
-            BlockData {
-                n_args: 0,
-                next_var: 1,
-                ops: vec![Op::Const(Var(0), ConstValue::Integer(42)), Op::Term(Var(0))],
-                preceding_blocks: vec![Rc::downgrade(&entry.data)]
-            }
+            entry,
+            vec![Op::CondBranch(
+                VarName(0),
+                yes,
+                vec![VarName(1)],
+                exit,
+                vec![VarName(1)]
+            ),]
         );
     }
 
     #[test]
-    fn basic_ssa_liveness_graph() {
-        let block = Block::new(1);
-        let a = block.parameter(0);
-        let b = block.constant(2);
-        let a2 = block.mul(a, a);
-        let b2 = block.mul(b, b);
-        let c = block.add(a2, b2);
-        block.terminate(c);
-
-        let mut expected = LivenessGraph::new();
-        expected.add_liveset(&[a, b]);
-        expected.add_liveset(&[a2, b]);
-        expected.add_liveset(&[a2, b2]);
-        expected.add_liveset(&[c]);
-
-        assert_eq!(LivenessGraph::build(&block), expected)
+    #[should_panic]
+    fn conditional_branch_assignment_error() {
+        let tu = TranslationUnit::<()>::new();
+        let entry = tu.new_block();
+        let yes = tu.new_block();
+        let no = tu.new_block();
+        let exit = tu.new_block();
+        let c = entry.append_parameter();
+        entry.branch_conditionally(&c, &yes, &[], &no, &[]);
+        let _ = yes.constant(());
+        yes.branch(&exit, &[]);
+        let x = no.constant(());
+        no.branch(&exit, &[]);
+        exit.terminate(&x);
+        tu.verify(&entry);
     }
 
     #[test]
-    fn basic_ssa_register_assign() {
-        let block = Block::new(1);
-        let a = block.parameter(0);
-        let b = block.constant(2);
-        let a2 = block.mul(a, a);
-        let b2 = block.mul(b, b);
-        let c = block.add(a2, b2);
-        block.terminate(c);
+    fn conditional_branch_outer_variable() {
+        let tu = TranslationUnit::<()>::new();
+        let entry = tu.new_block();
+        let yes = tu.new_block();
+        let no = tu.new_block();
+        let exit = tu.new_block();
+        let c = entry.append_parameter();
+        let x = entry.append_parameter();
+        entry.branch_conditionally(&c, &yes, &[], &no, &[]);
+        yes.branch(&exit, &[]);
+        no.branch(&exit, &[]);
+        exit.terminate(&x);
 
-        let lg = LivenessGraph::build(&block);
+        tu.verify(&entry);
 
-        let mut expected = HashMap::new();
-        expected.insert(a, 0);
-        expected.insert(b, 1);
-        expected.insert(a2, 0);
-        expected.insert(b2, 1);
-        expected.insert(c, 0);
+        assert_eq!(exit, vec![Op::Term(VarName(1)),]);
 
-        assert_eq!(lg.greedy_assign(HashMap::new()), expected)
+        assert_eq!(yes, vec![Op::Branch(exit.clone(), vec![]),]);
+
+        assert_eq!(no, vec![Op::Branch(exit.clone(), vec![]),]);
+
+        assert_eq!(
+            entry,
+            vec![Op::CondBranch(VarName(0), yes, vec![], no, vec![]),]
+        );
     }
 
     #[test]
-    fn branch_register_assign() {
-        let entry = Block::new(1);
-        let done = Block::new(2);
-        let a = entry.parameter(0);
-        let b = entry.constant(42);
-        entry.branch(&done, &[a, b]);
-        let c = done.parameter(1);
-        done.terminate(c);
+    fn simple_liveness_graph() {
+        let tu = TranslationUnit::<i32>::new();
+        let entry = tu.new_block();
+        let x = entry.append_parameter();
+        let y = entry.append_parameter();
+        // alive: 0, 1
+        let k = entry.constant(2);
+        // alive: 2, 0, 1
+        let z = entry.mul(&x, &y);
+        // alive: 3, 2
+        let z = entry.add(&z, &k);
+        // alive: 4
+        entry.terminate(&z);
 
-        let lg = LivenessGraph::build(&entry);
-        lg.greedy_assign(HashMap::new());
-        panic!()
+        tu.verify(&entry);
+
+        assert_eq!(
+            tu.build_liveness_graph(&entry),
+            map![
+                    VarName(4) => set![],
+                    VarName(3) => set![VarName(2)],
+                    VarName(2) => set![VarName(0), VarName(1), VarName(3)],
+                    VarName(1) => set![VarName(0), VarName(2)],
+                    VarName(0) => set![VarName(1), VarName(2)],
+            ]
+        );
+    }
+
+    #[test]
+    fn branch_liveness_graph() {
+        let tu = TranslationUnit::<i32>::new();
+        let entry = tu.new_block();
+        let exit = tu.new_block();
+
+        let x = entry.append_parameter();
+        let y = entry.append_parameter();
+        // alive: 0, 1
+        let z = entry.add(&x, &y);
+        // alive: 1, 2
+        entry.branch(&exit, &[&z]);
+
+        let z = exit.append_parameter();
+        // alive: 1, 3
+        let w = exit.add(&z, &y);
+        //alive: 4
+        exit.terminate(&w);
+
+        tu.verify(&entry);
+
+        assert_eq!(
+            tu.build_liveness_graph(&entry),
+            map![
+                VarName(4) => set![],
+                VarName(3) => set![VarName(1)],
+                VarName(2) => set![VarName(1)],
+                VarName(1) => set![VarName(0), VarName(2), VarName(3)],
+                VarName(0) => set![VarName(1)],
+            ]
+        );
+    }
+
+    #[test]
+    fn conditional_branch_with_args_liveness_graph() {
+        let tu = TranslationUnit::<i64>::new();
+        let entry = tu.new_block();
+        let yes = tu.new_block();
+        let exit = tu.new_block();
+        let c = entry.append_parameter();
+        let x = entry.append_parameter();
+        // alive: 0, 1
+        entry.branch_conditionally(&c, &yes, &[&x], &exit, &[&x]);
+
+        let y = yes.append_parameter();
+        // alive: 0, 2
+        let k = yes.constant(100);
+        // alive: 0, 2, 3
+        let y = yes.add(&y, &k);
+        // alive: 0, 4
+        yes.branch(&exit, &[&y]);
+
+        let z = exit.append_parameter();
+        // alive: 0, 5
+        let w = exit.add(&z, &c);
+        // alive: 6
+        exit.terminate(&w);
+
+        tu.verify(&entry);
+
+        assert_eq!(
+            tu.build_liveness_graph(&entry),
+            map![
+                VarName(6) => set![],
+                VarName(5) => set![VarName(0)],
+                VarName(4) => set![VarName(0)],
+                VarName(3) => set![VarName(0), VarName(2)],
+                VarName(2) => set![VarName(0), VarName(3)],
+                VarName(1) => set![VarName(0)],
+                VarName(0) => set![VarName(5), VarName(4), VarName(3), VarName(2), VarName(1)],
+            ]
+        );
+    }
+
+    #[test]
+    fn assign_registers_fully_connected() {
+        let graph = map![
+            'A' => set!['B', 'C'],
+            'B' => set!['A', 'C'],
+            'C' => set!['A', 'B']
+        ];
+        assert_eq!(
+            greedy_coloring(&graph, HashMap::new()),
+            map!['A' => 2, 'B' => 1, 'C' => 0]
+        );
+    }
+
+    #[test]
+    fn assign_registers_fully_unconnected() {
+        let graph = map![
+            'A' => set![],
+            'B' => set![],
+            'C' => set![]
+        ];
+        assert_eq!(
+            greedy_coloring(&graph, HashMap::new()),
+            map!['A' => 0, 'B' => 0, 'C' => 0]
+        );
+    }
+
+    #[test]
+    fn assign_registers_simple_cycle() {
+        let graph = map![
+            'A' => set!['E', 'B'],
+            'B' => set!['A', 'C'],
+            'C' => set!['B', 'D'],
+            'D' => set!['C', 'E'],
+            'E' => set!['D', 'A']
+        ];
+        assert_eq!(
+            greedy_coloring(&graph, HashMap::new()),
+            map!['A' => 2, 'B' => 1, 'C' => 0, 'D' => 1, 'E' => 0]
+        );
     }
 }
