@@ -1,9 +1,9 @@
 use pest::error::{InputLocation, LineColLocation};
 use pest::{iterators::Pair, Parser, RuleType, Span};
 use pest_derive::*;
-use std::cell::{RefCell, Ref};
-use std::marker::PhantomData;
 use std::borrow::Borrow;
+use std::cell::{Ref, RefCell};
+use std::marker::PhantomData;
 
 pub type Result<T, R> = std::result::Result<T, Error<R>>;
 
@@ -130,7 +130,7 @@ fn write_list(x: &Object<'_>, f: &mut std::fmt::Formatter) -> std::fmt::Result {
             write_list(&(**p).borrow().1, f)
         }
         ObjectKind::Nil => Ok(()),
-        _ => write!(f, " . {}", x)
+        _ => write!(f, " . {}", x),
     }
 }
 
@@ -263,14 +263,8 @@ mod tests {
             "{}",
             parse_datum("(#e1 |x y| #i2 \"foo\" bar #b10 4.7 . 5)").unwrap()
         );
-        println!(
-            "{}",
-            parse_datum("(define (two-sqr x) (* 2 x x))").unwrap()
-        );
-        println!(
-            "{}",
-            parse_datum("(define (two-sqr x) (* 2 x x))").unwrap()
-        );
+        println!("{}", parse_datum("(define (two-sqr x) (* 2 x x))").unwrap());
+        println!("{}", parse_datum("(define (two-sqr x) (* 2 x x))").unwrap());
         println!("{}", parse_datum("'(1 2 3)").unwrap());
     }
 }

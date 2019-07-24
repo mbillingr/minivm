@@ -127,7 +127,7 @@ impl<V> Block<V> {
     }
 
     pub fn terminate(&self, x: &Var<V>) {
-        self.block.borrow_mut().append_op(Op::Term(x.name));
+        self.block.borrow_mut().append_op(Op::Return(x.name));
     }
 
     pub fn branch(&self, target: &Block<V>, args: &[&Var<V>]) {
@@ -306,20 +306,47 @@ impl VarName {
 }
 
 #[derive(Debug)]
+struct Function {}
+
+impl Function {
+    fn n_params(&self) -> usize {
+        unimplemented!()
+    }
+
+    fn get_argument_registers(&self) -> Option<&[usize]> {
+        unimplemented!()
+    }
+    
+    fn set_argument_registers(&mut self, registers: &[usize]) {
+        unimplemented!()
+    }
+}
+
+#[derive(Debug)]
 enum Op<V> {
     Const(VarName, V),
     Add(VarName, VarName, VarName),
     Mul(VarName, VarName, VarName),
 
-    Term(VarName),
     Branch(Block<V>, Vec<VarName>),
     CondBranch(VarName, Block<V>, Vec<VarName>, Block<V>, Vec<VarName>),
+
+    Return(VarName),
+    Call(VarName, Function, Vec<VarName>),
+    TailCall(Function, Vec<VarName>),
+
+    CallDynamic(VarName, VarName, Vec<VarName>),
+    TailCallDynamic(VarName, Vec<VarName>),
 }
 
 impl<V> Op<V> {
     fn is_terminal(&self) -> bool {
         match self {
-            Op::Term(_) | Op::Branch(_, _) | Op::CondBranch(_, _, _, _, _) => true,
+            Op::Return(_)
+            | Op::Branch(_, _)
+            | Op::CondBranch(_, _, _, _, _)
+            | Op::TailCall(_, _)
+            | Op::TailCallDynamic(_, _) => true,
             _ => false,
         }
     }
@@ -338,7 +365,7 @@ impl<V> Op<V> {
                 assert!(assigned_vars.contains(b));
                 assigned_vars.insert(*z);
             }
-            Op::Term(a) => assert!(assigned_vars.contains(a)),
+            Op::Return(a) => assert!(assigned_vars.contains(a)),
             Op::Branch(block, args) => {
                 for a in args {
                     assert!(assigned_vars.contains(a));
@@ -357,6 +384,32 @@ impl<V> Op<V> {
                 then_block.verify(&mut assigned_vars.clone());
                 else_block.verify(assigned_vars);
             }
+            Op::Call(z, func, args) => {
+                for a in args {
+                    assert!(assigned_vars.contains(a));
+                }
+                assert_eq!(args.len(), func.n_params());
+                assigned_vars.insert(*z);
+            }
+            Op::CallDynamic(z, func, args) => {
+                assert!(assigned_vars.contains(func));
+                for a in args {
+                    assert!(assigned_vars.contains(a));
+                }
+                assigned_vars.insert(*z);
+            }
+            Op::TailCall(func, args) => {
+                for a in args {
+                    assert!(assigned_vars.contains(a));
+                }
+                assert_eq!(args.len(), func.n_params());
+            }
+            Op::TailCallDynamic(func, args) => {
+                assert!(assigned_vars.contains(func));
+                for a in args {
+                    assert!(assigned_vars.contains(a));
+                }
+            }
         }
     }
 
@@ -373,7 +426,7 @@ impl<V> Op<V> {
                 liveset.insert(*a);
                 liveset.insert(*b);
             }
-            Op::Term(a) => {
+            Op::Return(a) => {
                 liveset.insert(*a);
             }
             Op::Branch(blk, args) => {
@@ -390,6 +443,22 @@ impl<V> Op<V> {
                 liveset.insert(*cond);
                 liveset.extend(args1);
                 liveset.extend(args2);
+            }
+            Op::Call(z, _, args) => {
+                liveset.remove(z);
+                liveset.extend(args);
+            }
+            Op::CallDynamic(z, func, args) => {
+                liveset.remove(z);
+                liveset.insert(*func);
+                liveset.extend(args);
+            }
+            Op::TailCall(_, args) => {
+                liveset.extend(args);
+            }
+            Op::TailCallDynamic(func, args) => {
+                liveset.insert(*func);
+                liveset.extend(args);
             }
         }
 
@@ -410,7 +479,7 @@ impl<V> PartialEq for Op<V> {
             (Op::Const(z1, _), Op::Const(z2, _)) => z1 == z2,
             (Op::Add(z1, a1, b1), Op::Add(z2, a2, b2))
             | (Op::Mul(z1, a1, b1), Op::Mul(z2, a2, b2)) => (z1, a1, b1) == (z2, a2, b2),
-            (Op::Term(z1), Op::Term(z2)) => z1 == z2,
+            (Op::Return(z1), Op::Return(z2)) => z1 == z2,
             (Op::Branch(bl1, args1), Op::Branch(bl2, args2)) => {
                 bl1.id() == bl2.id() && args1 == args2
             }
@@ -475,8 +544,9 @@ fn next_node<K: std::hash::Hash + Eq + PartialOrd + Clone>(
                 .count();
             (distinct_colors.len(), unassigned_degree, node)
         })
-        .fold((0, 0, None), |best, (n_colors, sub_degree, node)| {
-            match best.2 {
+        .fold(
+            (0, 0, None),
+            |best, (n_colors, sub_degree, node)| match best.2 {
                 Some(ref bv)
                     if best.2.is_none()
                         || n_colors > best.0
@@ -487,8 +557,8 @@ fn next_node<K: std::hash::Hash + Eq + PartialOrd + Clone>(
                 }
                 None => (n_colors, sub_degree, Some(node)),
                 _ => best,
-            }
-        })
+            },
+        )
         .2
         .unwrap();
 
@@ -526,8 +596,14 @@ mod tests {
         exit.terminate(&exit.constant(()));
 
         tu.verify(&entry);
-        assert_eq!(entry, vec![Op::Const(VarName(0), ()), Op::Term(VarName(0))]);
-        assert_eq!(exit, vec![Op::Const(VarName(1), ()), Op::Term(VarName(1))]);
+        assert_eq!(
+            entry,
+            vec![Op::Const(VarName(0), ()), Op::Return(VarName(0))]
+        );
+        assert_eq!(
+            exit,
+            vec![Op::Const(VarName(1), ()), Op::Return(VarName(1))]
+        );
     }
 
     #[test]
@@ -548,7 +624,7 @@ mod tests {
                 Op::Const(VarName(2), 2),
                 Op::Mul(VarName(3), VarName(0), VarName(1)),
                 Op::Add(VarName(4), VarName(3), VarName(2)),
-                Op::Term(VarName(4))
+                Op::Return(VarName(4))
             ]
         );
     }
@@ -576,7 +652,7 @@ mod tests {
 
         tu.verify(&entry);
 
-        assert_eq!(exit, vec![Op::Term(VarName(0)),]);
+        assert_eq!(exit, vec![Op::Return(VarName(0)),]);
 
         assert_eq!(entry, vec![Op::Branch(exit, vec![]),]);
     }
@@ -593,7 +669,7 @@ mod tests {
 
         tu.verify(&entry);
 
-        assert_eq!(exit, vec![Op::Term(VarName(1)),]);
+        assert_eq!(exit, vec![Op::Return(VarName(1)),]);
 
         assert_eq!(entry, vec![Op::Branch(exit, vec![VarName(0)]),]);
     }
@@ -635,9 +711,12 @@ mod tests {
 
         tu.verify(&entry);
 
-        assert_eq!(yes, vec![Op::Const(VarName(1), ()), Op::Term(VarName(1)),]);
+        assert_eq!(
+            yes,
+            vec![Op::Const(VarName(1), ()), Op::Return(VarName(1)),]
+        );
 
-        assert_eq!(no, vec![Op::Const(VarName(2), ()), Op::Term(VarName(2)),]);
+        assert_eq!(no, vec![Op::Const(VarName(2), ()), Op::Return(VarName(2)),]);
 
         assert_eq!(
             entry,
@@ -662,7 +741,7 @@ mod tests {
 
         tu.verify(&entry);
 
-        assert_eq!(exit, vec![Op::Term(VarName(5)),]);
+        assert_eq!(exit, vec![Op::Return(VarName(5)),]);
 
         assert_eq!(
             yes,
@@ -719,7 +798,7 @@ mod tests {
 
         tu.verify(&entry);
 
-        assert_eq!(exit, vec![Op::Term(VarName(1)),]);
+        assert_eq!(exit, vec![Op::Return(VarName(1)),]);
 
         assert_eq!(yes, vec![Op::Branch(exit.clone(), vec![]),]);
 
