@@ -2,6 +2,10 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
 
+
+const RETURN_VALUE_REGISTER: usize = 0;
+
+
 macro_rules! set {
     ( ) => { ::std::collections::HashSet::new() };
 
@@ -69,14 +73,23 @@ impl<V> TranslationUnit<V> {
     }
 
     pub fn allocate_registers(&self, entry_block: &Block<V>) {
-        let liveness_graph = self.build_liveness_graph(entry_block);
+        let liveness_graph = LivenessGraph::build(entry_block);
         let mut data = self.unit.borrow_mut();
         let preassignment = std::mem::replace(&mut data.register_assignment, map![]);
-        data.register_assignment = greedy_coloring(&liveness_graph, preassignment);
+        data.register_assignment = greedy_coloring(&liveness_graph.edges, preassignment);
     }
 
-    fn build_liveness_graph(&self, entry_block: &Block<V>) -> HashMap<VarName, HashSet<VarName>> {
-        entry_block.build_liveness_graph().0
+    pub fn get_allocation(&self, var: Var<V>) -> Option<usize> {
+        self.unit.borrow().register_assignment.get(&var.name).cloned()
+    }
+
+    pub fn set_allocation(&self, var: Var<V>, reg: usize) {
+        self.unit.borrow_mut().register_assignment.insert(var.name, reg);
+    }
+
+    fn preassign_function_arg_registers(&self, entry_block: &Block<V>) {
+        let mut data = self.unit.borrow_mut();
+        entry_block.preassign_function_arg_registers(&mut data.register_assignment);
     }
 }
 
@@ -100,6 +113,10 @@ impl<V> Block<V> {
 
     pub fn n_params(&self) -> usize {
         self.block.borrow().params.len()
+    }
+
+    pub fn params(&self) -> Vec<Var<V>> {
+        self.block.borrow().params.iter().map(|&name|Var::new(self.unit.clone(), self, name)).collect()
     }
 
     pub fn constant(&self, c: impl Into<V>) -> Var<V> {
@@ -170,24 +187,17 @@ impl<V> Block<V> {
         }
     }
 
-    fn build_liveness_graph(&self) -> (HashMap<VarName, HashSet<VarName>>, HashSet<VarName>) {
-        let block = self.block.borrow();
-
-        let mut liveset = set![];
-        let mut subgraph = map![];
-
-        for op in block.ops.iter().rev() {
-            let (g, l) = op.update_liveness_graph((subgraph, liveset));
-            liveset = l;
-            subgraph = g;
-            println!("{:?}: {:?}", self.id(), liveset);
-        }
-
-        for p in &block.params {
-            liveset.remove(p);
-        }
-
-        (subgraph, liveset)
+    fn preassign_function_arg_registers(&self, assignment: &mut HashMap<VarName, usize>) {
+        /*let block = self.block.borrow();
+        for op in &block.ops {
+            match op {
+                Op::Call(retval, func, args) => {
+                    assignment[retval] = RETURN_VALUE_REGISTER;
+                    func.get_argument_registers()
+                }
+            }
+        }*/
+        unimplemented!()
     }
 }
 
@@ -306,19 +316,63 @@ impl VarName {
 }
 
 #[derive(Debug)]
-struct Function {}
+struct Function<V> {
+    data: Rc<RefCell<FunctionData<V>>>
+}
 
-impl Function {
+impl<V> Function<V> {
     fn n_params(&self) -> usize {
-        unimplemented!()
+        self.data.borrow().n_params()
     }
 
-    fn get_argument_registers(&self) -> Option<&[usize]> {
-        unimplemented!()
+    fn get_argument_registers(&self) -> Option<Vec<usize>> {
+        self.data.borrow().get_argument_registers()
     }
-    
+
+    fn set_argument_registers(&self, registers: &[usize]) {
+        self.data.borrow_mut().set_argument_registers(registers)
+    }
+
+    fn compile(&self) {
+        self.data.borrow_mut().compile()
+    }
+}
+
+#[derive(Debug)]
+struct FunctionData<V> {
+    unit: TranslationUnit<V>,
+    entry_block: Block<V>,
+    compiled: bool,
+}
+
+impl<V> FunctionData<V> {
+    fn n_params(&self) -> usize {
+        self.entry_block.n_params()
+    }
+
+    fn get_argument_registers(&self) -> Option<Vec<usize>> {
+        if self.compiled {
+            let param_vars = self.entry_block.params();
+            let param_regs = param_vars.into_iter().map(|v| self.unit.get_allocation(v).expect("unassigned register")).collect();
+            Some(param_regs)
+        } else {
+            None
+        }
+    }
+
     fn set_argument_registers(&mut self, registers: &[usize]) {
-        unimplemented!()
+        assert!(!self.compiled);
+        assert_eq!(registers.len(), self.n_params());
+        let param_vars = self.entry_block.params();
+        for (v, &r) in param_vars.into_iter().zip(registers) {
+            self.unit.set_allocation(v, r);
+        }
+    }
+
+    fn compile(&mut self) {
+        assert!(!self.compiled);
+        self.unit.allocate_registers(&self.entry_block);
+        self.compiled = true;
     }
 }
 
@@ -328,12 +382,14 @@ enum Op<V> {
     Add(VarName, VarName, VarName),
     Mul(VarName, VarName, VarName),
 
+    Copy(VarName, VarName),
+
     Branch(Block<V>, Vec<VarName>),
     CondBranch(VarName, Block<V>, Vec<VarName>, Block<V>, Vec<VarName>),
 
     Return(VarName),
-    Call(VarName, Function, Vec<VarName>),
-    TailCall(Function, Vec<VarName>),
+    Call(VarName, Function<V>, Vec<VarName>),
+    TailCall(Function<V>, Vec<VarName>),
 
     CallDynamic(VarName, VarName, Vec<VarName>),
     TailCallDynamic(VarName, Vec<VarName>),
@@ -363,6 +419,10 @@ impl<V> Op<V> {
             Op::Add(z, a, b) | Op::Mul(z, a, b) => {
                 assert!(assigned_vars.contains(a));
                 assert!(assigned_vars.contains(b));
+                assigned_vars.insert(*z);
+            }
+            Op::Copy(z, a) => {
+                assert!(assigned_vars.contains(a));
                 assigned_vars.insert(*z);
             }
             Op::Return(a) => assert!(assigned_vars.contains(a)),
@@ -412,65 +472,6 @@ impl<V> Op<V> {
             }
         }
     }
-
-    fn update_liveness_graph(
-        &self,
-        (mut graph, mut liveset): (HashMap<VarName, HashSet<VarName>>, HashSet<VarName>),
-    ) -> (HashMap<VarName, HashSet<VarName>>, HashSet<VarName>) {
-        match self {
-            Op::Const(z, _) => {
-                liveset.remove(z);
-            }
-            Op::Add(z, a, b) | Op::Mul(z, a, b) => {
-                liveset.remove(z);
-                liveset.insert(*a);
-                liveset.insert(*b);
-            }
-            Op::Return(a) => {
-                liveset.insert(*a);
-            }
-            Op::Branch(blk, args) => {
-                let (g, l) = blk.build_liveness_graph();
-                graph = g;
-                liveset = l;
-                liveset.extend(args);
-            }
-            Op::CondBranch(cond, blk1, args1, blk2, args2) => {
-                let (g1, l1) = blk1.build_liveness_graph();
-                let (g2, l2) = blk2.build_liveness_graph();
-                liveset = l1.union(&l2).cloned().collect();
-                graph = join_edges(g1, g2);
-                liveset.insert(*cond);
-                liveset.extend(args1);
-                liveset.extend(args2);
-            }
-            Op::Call(z, _, args) => {
-                liveset.remove(z);
-                liveset.extend(args);
-            }
-            Op::CallDynamic(z, func, args) => {
-                liveset.remove(z);
-                liveset.insert(*func);
-                liveset.extend(args);
-            }
-            Op::TailCall(_, args) => {
-                liveset.extend(args);
-            }
-            Op::TailCallDynamic(func, args) => {
-                liveset.insert(*func);
-                liveset.extend(args);
-            }
-        }
-
-        for a in &liveset {
-            graph
-                .entry(*a)
-                .or_default()
-                .extend(liveset.iter().filter(|&b| a != b));
-        }
-
-        (graph, liveset)
-    }
 }
 
 impl<V> PartialEq for Op<V> {
@@ -487,6 +488,100 @@ impl<V> PartialEq for Op<V> {
                 co1 == co2 && a1.id() == a2.id() && b1 == b2 && c1.id() == c2.id() && d1 == d2
             }
             _ => false,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct LivenessGraph {
+    edges: HashMap<VarName, HashSet<VarName>>,
+    liveset: HashSet<VarName>,
+}
+
+impl LivenessGraph {
+    fn new() -> Self {
+        LivenessGraph {
+            liveset: set![],
+            edges: map![],
+        }
+    }
+
+    fn join(self, other: Self) -> Self {
+        LivenessGraph {
+            liveset: self.liveset.union(&other.liveset).cloned().collect(),
+            edges: join_edges(self.edges, other.edges),
+        }
+    }
+
+    fn build<V>(block: &Block<V>) -> Self {
+        let block_data = block.block.borrow();
+
+        let mut subgraph = Self::new();
+
+        for op in block_data.ops.iter().rev() {
+            subgraph.update(op);
+        }
+
+        for p in &block_data.params {
+            subgraph.liveset.remove(p);
+        }
+
+        subgraph
+    }
+
+    fn update<V>(&mut self, op: &Op<V>) {
+        match op {
+            Op::Const(z, _) => {
+                self.liveset.remove(z);
+            }
+            Op::Add(z, a, b) | Op::Mul(z, a, b) => {
+                self.liveset.remove(z);
+                self.liveset.insert(*a);
+                self.liveset.insert(*b);
+            }
+            Op::Copy(z, a) => {
+                self.liveset.remove(z);
+                self.liveset.insert(*a);
+            }
+            Op::Return(a) => {
+                self.liveset.insert(*a);
+            }
+            Op::Branch(blk, args) => {
+                *self = Self::build(blk);
+                self.liveset.extend(args);
+            }
+            Op::CondBranch(cond, blk1, args1, blk2, args2) => {
+                let subgraph1 = Self::build(blk1);
+                let subgraph2 = Self::build(blk2);
+                *self = subgraph1.join(subgraph2);
+
+                self.liveset.insert(*cond);
+                self.liveset.extend(args1);
+                self.liveset.extend(args2);
+            }
+            Op::Call(z, _, args) => {
+                self.liveset.remove(z);
+                self.liveset.extend(args);
+            }
+            Op::CallDynamic(z, func, args) => {
+                self.liveset.remove(z);
+                self.liveset.insert(*func);
+                self.liveset.extend(args);
+            }
+            Op::TailCall(_, args) => {
+                self.liveset.extend(args);
+            }
+            Op::TailCallDynamic(func, args) => {
+                self.liveset.insert(*func);
+                self.liveset.extend(args);
+            }
+        }
+
+        for a in &self.liveset {
+            self.edges
+                .entry(*a)
+                .or_default()
+                .extend(self.liveset.iter().filter(|&b| a != b));
         }
     }
 }
@@ -828,7 +923,7 @@ mod tests {
         tu.verify(&entry);
 
         assert_eq!(
-            tu.build_liveness_graph(&entry),
+            LivenessGraph::build(&entry).edges,
             map![
                     VarName(4) => set![],
                     VarName(3) => set![VarName(2)],
@@ -861,7 +956,7 @@ mod tests {
         tu.verify(&entry);
 
         assert_eq!(
-            tu.build_liveness_graph(&entry),
+            LivenessGraph::build(&entry).edges,
             map![
                 VarName(4) => set![],
                 VarName(3) => set![VarName(1)],
@@ -900,7 +995,7 @@ mod tests {
         tu.verify(&entry);
 
         assert_eq!(
-            tu.build_liveness_graph(&entry),
+            LivenessGraph::build(&entry).edges,
             map![
                 VarName(6) => set![],
                 VarName(5) => set![VarName(0)],
@@ -952,5 +1047,29 @@ mod tests {
             greedy_coloring(&graph, HashMap::new()),
             map!['A' => 2, 'B' => 1, 'C' => 0, 'D' => 1, 'E' => 0]
         );
+    }
+
+    #[test]
+    fn interference() {
+        let tu = TranslationUnit::<i64>::new();
+        let ebb0 = tu.new_block();
+        let ebb1 = tu.new_block();
+
+        let v0 = ebb0.append_parameter();
+        let v1 = ebb0.append_parameter();
+        ebb0.branch_conditionally(&v0, &ebb1, &[&v0], &ebb1, &[&v1]);
+
+        let v2 = ebb1.append_parameter();
+        let v3 = ebb1.add(&v1, &v2);
+        ebb1.terminate(&v3);
+
+        tu.verify(&ebb0);
+
+        let liveness_graph = LivenessGraph::build(&ebb0);
+        let register_assignment = greedy_coloring(&liveness_graph.edges, map![]);
+
+        println!("{:?}", liveness_graph);
+        println!("{:?}", register_assignment);
+        panic!()
     }
 }
