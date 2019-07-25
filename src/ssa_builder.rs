@@ -2,9 +2,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
 
-
 const RETURN_VALUE_REGISTER: usize = 0;
-
+const FIRST_ARG_REGISTER: usize = 1;
 
 macro_rules! set {
     ( ) => { ::std::collections::HashSet::new() };
@@ -75,21 +74,35 @@ impl<V> TranslationUnit<V> {
     pub fn allocate_registers(&self, entry_block: &Block<V>) {
         let liveness_graph = LivenessGraph::build(entry_block);
         let mut data = self.unit.borrow_mut();
-        let preassignment = std::mem::replace(&mut data.register_assignment, map![]);
+        let mut preassignment = std::mem::replace(&mut data.register_assignment, map![]);
+        entry_block.preassign_function_arg_registers(&mut preassignment);
         data.register_assignment = greedy_coloring(&liveness_graph.edges, preassignment);
     }
 
-    pub fn get_allocation(&self, var: Var<V>) -> Option<usize> {
-        self.unit.borrow().register_assignment.get(&var.name).cloned()
+    pub fn get_allocation(&self, var: impl Into<VarName>) -> Option<usize> {
+        self.unit
+            .borrow()
+            .register_assignment
+            .get(&var.into())
+            .cloned()
     }
 
-    pub fn set_allocation(&self, var: Var<V>, reg: usize) {
-        self.unit.borrow_mut().register_assignment.insert(var.name, reg);
+    pub fn set_allocation(&self, var: impl Into<VarName>, reg: usize) {
+        self.unit
+            .borrow_mut()
+            .register_assignment
+            .insert(var.into(), reg);
     }
 
     fn preassign_function_arg_registers(&self, entry_block: &Block<V>) {
         let mut data = self.unit.borrow_mut();
         entry_block.preassign_function_arg_registers(&mut data.register_assignment);
+    }
+}
+
+impl<V> From<&Var<V>> for VarName {
+    fn from(var: &Var<V>) -> Self {
+        var.name
     }
 }
 
@@ -116,7 +129,12 @@ impl<V> Block<V> {
     }
 
     pub fn params(&self) -> Vec<Var<V>> {
-        self.block.borrow().params.iter().map(|&name|Var::new(self.unit.clone(), self, name)).collect()
+        self.block
+            .borrow()
+            .params
+            .iter()
+            .map(|&name| Var::new(self.unit.clone(), self, name))
+            .collect()
     }
 
     pub fn constant(&self, c: impl Into<V>) -> Var<V> {
@@ -173,6 +191,13 @@ impl<V> Block<V> {
         ));
     }
 
+    pub fn tail_call(&self, func: &Var<V>, args: &[&Var<V>]) {
+        let arg_names = args.iter().map(|a| a.name).collect();
+        self.block
+            .borrow_mut()
+            .append_op(Op::TailCallDynamic(func.name, arg_names));
+    }
+
     fn new_var(&self) -> Var<V> {
         let name = self.unit.upgrade().new_var_name();
         Var::new(self.unit.clone(), self, name)
@@ -188,16 +213,24 @@ impl<V> Block<V> {
     }
 
     fn preassign_function_arg_registers(&self, assignment: &mut HashMap<VarName, usize>) {
-        /*let block = self.block.borrow();
+        let block = self.block.borrow();
         for op in &block.ops {
             match op {
-                Op::Call(retval, func, args) => {
-                    assignment[retval] = RETURN_VALUE_REGISTER;
-                    func.get_argument_registers()
+                Op::CallDynamic(retval, _, args) | Op::Call(retval, _, args) => {
+                    assignment.insert(*retval, RETURN_VALUE_REGISTER);
+                    assignment.extend(args.iter().cloned().zip(FIRST_ARG_REGISTER..));
                 }
+                Op::TailCallDynamic(_, args) | Op::TailCall(_, args) => {
+                    assignment.extend(args.iter().cloned().zip(FIRST_ARG_REGISTER..));
+                }
+                Op::Branch(blk, _) => blk.preassign_function_arg_registers(assignment),
+                Op::CondBranch(_, blk1, _, blk2, _) => {
+                    blk1.preassign_function_arg_registers(assignment);
+                    blk2.preassign_function_arg_registers(assignment);
+                }
+                _ => {}
             }
-        }*/
-        unimplemented!()
+        }
     }
 }
 
@@ -317,7 +350,7 @@ impl VarName {
 
 #[derive(Debug)]
 struct Function<V> {
-    data: Rc<RefCell<FunctionData<V>>>
+    data: Rc<RefCell<FunctionData<V>>>,
 }
 
 impl<V> Function<V> {
@@ -353,7 +386,10 @@ impl<V> FunctionData<V> {
     fn get_argument_registers(&self) -> Option<Vec<usize>> {
         if self.compiled {
             let param_vars = self.entry_block.params();
-            let param_regs = param_vars.into_iter().map(|v| self.unit.get_allocation(v).expect("unassigned register")).collect();
+            let param_regs = param_vars
+                .into_iter()
+                .map(|v| self.unit.get_allocation(&v).expect("unassigned register"))
+                .collect();
             Some(param_regs)
         } else {
             None
@@ -365,12 +401,26 @@ impl<V> FunctionData<V> {
         assert_eq!(registers.len(), self.n_params());
         let param_vars = self.entry_block.params();
         for (v, &r) in param_vars.into_iter().zip(registers) {
-            self.unit.set_allocation(v, r);
+            self.unit.set_allocation(&v, r);
         }
     }
 
     fn compile(&mut self) {
         assert!(!self.compiled);
+        // pre-assign registers to parameters
+        for (param, reg) in self
+            .entry_block
+            .params()
+            .into_iter()
+            .zip(FIRST_ARG_REGISTER..)
+        {
+            if let Some(r) = self.unit.get_allocation(&param) {
+                if r != reg {
+                    panic!("register assignment corflict");
+                }
+            }
+            self.unit.set_allocation(&param, reg);
+        }
         self.unit.allocate_registers(&self.entry_block);
         self.compiled = true;
     }
@@ -1050,26 +1100,21 @@ mod tests {
     }
 
     #[test]
-    fn interference() {
+    fn assign_call_registers() {
         let tu = TranslationUnit::<i64>::new();
-        let ebb0 = tu.new_block();
-        let ebb1 = tu.new_block();
+        let entry = tu.new_block();
+        let f = entry.append_parameter();
+        let x = entry.append_parameter();
+        let y = entry.append_parameter();
+        let z = entry.append_parameter();
 
-        let v0 = ebb0.append_parameter();
-        let v1 = ebb0.append_parameter();
-        ebb0.branch_conditionally(&v0, &ebb1, &[&v0], &ebb1, &[&v1]);
+        entry.tail_call(&f, &[&z, &x, &y]);
 
-        let v2 = ebb1.append_parameter();
-        let v3 = ebb1.add(&v1, &v2);
-        ebb1.terminate(&v3);
+        tu.verify(&entry);
 
-        tu.verify(&ebb0);
+        tu.allocate_registers(&entry);
 
-        let liveness_graph = LivenessGraph::build(&ebb0);
-        let register_assignment = greedy_coloring(&liveness_graph.edges, map![]);
-
-        println!("{:?}", liveness_graph);
-        println!("{:?}", register_assignment);
+        println!("{:?}", tu);
         panic!()
     }
 }
