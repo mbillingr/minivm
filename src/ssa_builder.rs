@@ -1,5 +1,6 @@
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::iter::once;
 use std::rc::{Rc, Weak};
 
 const RETURN_VALUE_REGISTER: usize = 0;
@@ -49,7 +50,7 @@ pub struct Var<V> {
     name: VarName,
 }
 
-impl<V> TranslationUnit<V> {
+impl<V: std::fmt::Debug> TranslationUnit<V> {
     pub fn new() -> Self {
         TranslationUnit {
             unit: Rc::new(RefCell::new(TransUnitData::new())),
@@ -72,11 +73,15 @@ impl<V> TranslationUnit<V> {
     }
 
     pub fn allocate_registers(&self, entry_block: &Block<V>) {
-        let liveness_graph = LivenessGraph::build(entry_block);
-        let mut data = self.unit.borrow_mut();
-        let mut preassignment = std::mem::replace(&mut data.register_assignment, map![]);
+        let mut preassignment =
+            std::mem::replace(&mut self.unit.borrow_mut().register_assignment, map![]);
         entry_block.preassign_function_arg_registers(&mut preassignment);
-        data.register_assignment = greedy_coloring(&liveness_graph.edges, preassignment);
+        let liveness_graph = LivenessGraph::build(entry_block);
+        self.unit.borrow_mut().register_assignment = greedy_coloring(
+            &liveness_graph.edges,
+            preassignment,
+            &liveness_graph.preference_pairs,
+        );
     }
 
     pub fn get_allocation(&self, var: impl Into<VarName>) -> Option<usize> {
@@ -106,7 +111,7 @@ impl<V> From<&Var<V>> for VarName {
     }
 }
 
-impl<V> Block<V> {
+impl<V: std::fmt::Debug> Block<V> {
     pub fn new(unit: &TranslationUnit<V>) -> Self {
         Block {
             unit: unit.into(),
@@ -142,6 +147,14 @@ impl<V> Block<V> {
         self.block
             .borrow_mut()
             .append_op(Op::Const(var.name, c.into()));
+        var
+    }
+
+    pub fn copy(&self, x: &Var<V>) -> Var<V> {
+        let var = self.new_var();
+        self.block
+            .borrow_mut()
+            .append_op(Op::Copy(var.name, x.name));
         var
     }
 
@@ -198,6 +211,15 @@ impl<V> Block<V> {
             .append_op(Op::TailCallDynamic(func.name, arg_names));
     }
 
+    pub fn call(&self, func: &Var<V>, args: &[&Var<V>]) -> Var<V> {
+        let ret = self.new_var();
+        let arg_names = args.iter().map(|a| a.name).collect();
+        self.block
+            .borrow_mut()
+            .append_op(Op::CallDynamic(ret.name, func.name, arg_names));
+        ret
+    }
+
     fn new_var(&self) -> Var<V> {
         let name = self.unit.upgrade().new_var_name();
         Var::new(self.unit.clone(), self, name)
@@ -213,22 +235,69 @@ impl<V> Block<V> {
     }
 
     fn preassign_function_arg_registers(&self, assignment: &mut HashMap<VarName, usize>) {
-        let block = self.block.borrow();
-        for op in &block.ops {
-            match op {
-                Op::CallDynamic(retval, _, args) | Op::Call(retval, _, args) => {
-                    assignment.insert(*retval, RETURN_VALUE_REGISTER);
-                    assignment.extend(args.iter().cloned().zip(FIRST_ARG_REGISTER..));
+        loop {
+            let mut conflicts = vec![];
+            {
+                let block = self.block.borrow();
+                'conflict: for (i, op) in block.ops.iter().enumerate() {
+                    match op {
+                        Op::CallDynamic(retval, _, args) | Op::Call(retval, _, args) => {
+                            for (var, reg) in args
+                                .iter()
+                                .cloned()
+                                .zip(FIRST_ARG_REGISTER..)
+                                .chain(once((*retval, RETURN_VALUE_REGISTER)))
+                            {
+                                if let Some(&r) = assignment.get(&var) {
+                                    if r != reg {
+                                        conflicts.push((var, i));
+                                    }
+                                }
+                                if conflicts.is_empty() {
+                                    assignment.insert(var, reg);
+                                }
+                            }
+                        }
+                        Op::TailCallDynamic(_, args) | Op::TailCall(_, args) => {
+                            for (var, reg) in args.iter().cloned().zip(FIRST_ARG_REGISTER..) {
+                                if let Some(&r) = assignment.get(&var) {
+                                    if r != reg {
+                                        conflicts.push((var, i));
+                                    }
+                                }
+                                if conflicts.is_empty() {
+                                    assignment.insert(var, reg);
+                                }
+                            }
+                        }
+                        Op::Branch(blk, _) => blk.preassign_function_arg_registers(assignment),
+                        Op::CondBranch(_, blk1, _, blk2, _) => {
+                            blk1.preassign_function_arg_registers(assignment);
+                            blk2.preassign_function_arg_registers(assignment);
+                        }
+                        _ => {}
+                    };
                 }
-                Op::TailCallDynamic(_, args) | Op::TailCall(_, args) => {
-                    assignment.extend(args.iter().cloned().zip(FIRST_ARG_REGISTER..));
+            }
+
+            if conflicts.is_empty() {
+                return;
+            } else {
+                let mut idx_shift = 0;
+                for (var, op_idx) in conflicts {
+                    let op_idx = op_idx + idx_shift * 2;
+                    let tmp_var1 = self.new_var();
+                    let tmp_var2 = self.new_var();
+                    let mut block = self.block.borrow_mut();
+                    block.ops[op_idx].replace_var(var, tmp_var2.name);
+                    block
+                        .ops
+                        .insert(op_idx - idx_shift, Op::Copy(tmp_var2.name, tmp_var1.name));
+                    block
+                        .ops
+                        .insert(op_idx - idx_shift, Op::Copy(tmp_var1.name, var));
+                    idx_shift += 1;
                 }
-                Op::Branch(blk, _) => blk.preassign_function_arg_registers(assignment),
-                Op::CondBranch(_, blk1, _, blk2, _) => {
-                    blk1.preassign_function_arg_registers(assignment);
-                    blk2.preassign_function_arg_registers(assignment);
-                }
-                _ => {}
             }
         }
     }
@@ -243,7 +312,7 @@ impl<V> Clone for Block<V> {
     }
 }
 
-impl<V> Var<V> {
+impl<V: std::fmt::Debug> Var<V> {
     fn new(unit: WeakUnit<V>, block: &Block<V>, name: VarName) -> Self {
         Var {
             unit,
@@ -319,7 +388,7 @@ struct BlockData<V> {
     params: Vec<VarName>,
 }
 
-impl<V> BlockData<V> {
+impl<V: std::fmt::Debug> BlockData<V> {
     fn new() -> Self {
         BlockData {
             ops: vec![],
@@ -353,7 +422,7 @@ struct Function<V> {
     data: Rc<RefCell<FunctionData<V>>>,
 }
 
-impl<V> Function<V> {
+impl<V: std::fmt::Debug> Function<V> {
     fn n_params(&self) -> usize {
         self.data.borrow().n_params()
     }
@@ -378,7 +447,7 @@ struct FunctionData<V> {
     compiled: bool,
 }
 
-impl<V> FunctionData<V> {
+impl<V: std::fmt::Debug> FunctionData<V> {
     fn n_params(&self) -> usize {
         self.entry_block.n_params()
     }
@@ -445,7 +514,7 @@ enum Op<V> {
     TailCallDynamic(VarName, Vec<VarName>),
 }
 
-impl<V> Op<V> {
+impl<V: std::fmt::Debug> Op<V> {
     fn is_terminal(&self) -> bool {
         match self {
             Op::Return(_)
@@ -459,6 +528,75 @@ impl<V> Op<V> {
 
     fn is_nonterminal(&self) -> bool {
         !self.is_terminal()
+    }
+
+    fn replace_var(&mut self, old: VarName, new: VarName) {
+        match self {
+            Op::Const(v, _) | Op::Return(v) => {
+                if v == &old {
+                    *v = new
+                }
+            }
+            Op::Add(a, b, c) | Op::Mul(a, b, c) => {
+                if a == &old {
+                    *a = new
+                }
+                if b == &old {
+                    *b = new
+                }
+                if c == &old {
+                    *c = new
+                }
+            }
+            Op::Copy(a, b) => {
+                if a == &old {
+                    *a = new
+                }
+                if b == &old {
+                    *b = new
+                }
+            }
+            Op::Branch(_, args) | Op::TailCall(_, args) => {
+                for a in args {
+                    if a == &old {
+                        *a = new
+                    }
+                }
+            }
+            Op::CondBranch(c, _, args1, _, args2) => {
+                if c == &old {
+                    *c = new
+                }
+                for a in args1.iter_mut().chain(args2) {
+                    if a == &old {
+                        *a = new
+                    }
+                }
+            }
+            Op::Call(a, _, args) | Op::TailCallDynamic(a, args) => {
+                if a == &old {
+                    *a = new
+                }
+                for a in args {
+                    if a == &old {
+                        *a = new
+                    }
+                }
+            }
+            Op::CallDynamic(a, b, args) => {
+                if a == &old {
+                    *a = new
+                }
+                if b == &old {
+                    *b = new
+                }
+                for a in args {
+                    if a == &old {
+                        *a = new
+                    }
+                }
+            }
+        }
     }
 
     fn verify(&self, assigned_vars: &mut HashSet<VarName>) {
@@ -524,7 +662,7 @@ impl<V> Op<V> {
     }
 }
 
-impl<V> PartialEq for Op<V> {
+impl<V: std::fmt::Debug> PartialEq for Op<V> {
     fn eq(&self, rhs: &Self) -> bool {
         match (self, rhs) {
             (Op::Const(z1, _), Op::Const(z2, _)) => z1 == z2,
@@ -546,6 +684,9 @@ impl<V> PartialEq for Op<V> {
 struct LivenessGraph {
     edges: HashMap<VarName, HashSet<VarName>>,
     liveset: HashSet<VarName>,
+
+    /// variables that would like to be assigned to the same register, if possible
+    preference_pairs: Vec<(VarName, VarName)>,
 }
 
 impl LivenessGraph {
@@ -553,6 +694,7 @@ impl LivenessGraph {
         LivenessGraph {
             liveset: set![],
             edges: map![],
+            preference_pairs: vec![],
         }
     }
 
@@ -560,6 +702,11 @@ impl LivenessGraph {
         LivenessGraph {
             liveset: self.liveset.union(&other.liveset).cloned().collect(),
             edges: join_edges(self.edges, other.edges),
+            preference_pairs: {
+                let mut pairs = self.preference_pairs;
+                pairs.extend(other.preference_pairs.into_iter());
+                pairs
+            },
         }
     }
 
@@ -592,6 +739,11 @@ impl LivenessGraph {
             Op::Copy(z, a) => {
                 self.liveset.remove(z);
                 self.liveset.insert(*a);
+                // The register allocator should prefer assignments that make copies redundant
+                // TODO: evaluate if making this explicit really has benefits
+                //       (the allocator heuristically minimizes the number of registers used,
+                //       which might actually have the same effect.)
+                self.preference_pairs.push((*a, *z));
             }
             Op::Return(a) => {
                 self.liveset.insert(*a);
@@ -649,19 +801,35 @@ fn join_edges<K: std::hash::Hash + Eq>(
 fn greedy_coloring<K: std::hash::Hash + Eq + PartialOrd + Clone>(
     graph: &HashMap<K, HashSet<K>>,
     mut assignment: HashMap<K, usize>,
+    preferences: &Vec<(K, K)>,
 ) -> HashMap<K, usize> {
     let mut remaining_nodes: HashSet<_> = graph.keys().cloned().collect();
 
     while let Some(node) = next_node(graph, &mut remaining_nodes, &assignment) {
         let neighbors = &graph[&node];
 
-        let neighbor_colors: Vec<_> = neighbors
-            .iter()
-            .filter_map(|n| assignment.get(n))
-            .cloned()
-            .collect();
+        let mut neighbor_colors = neighbors.iter().filter_map(|n| assignment.get(n));
 
-        assignment.insert(node, find_smallest_color(neighbor_colors));
+        if let Some(color) = assignment.get(&node) {
+            if neighbor_colors.any(|nc| nc == color) {
+                panic!("Can't find valid coloring")
+            }
+        } else {
+            let neighbor_colors: BTreeSet<_> = neighbor_colors.cloned().collect();
+            let color = preferences
+                .iter()
+                .filter_map(|(a, b)| match (a, b) {
+                    (a, b) if a == &node => Some(b),
+                    (a, b) if b == &node => Some(a),
+                    _ => None,
+                })
+                .filter_map(|x| assignment.get(x))
+                .filter(|&c| !neighbor_colors.contains(c))
+                .cloned()
+                .next();
+            let color = color.unwrap_or_else(|| find_smallest_color(neighbor_colors));
+            assignment.insert(node, color);
+        }
     }
 
     assignment
@@ -711,9 +879,8 @@ fn next_node<K: std::hash::Hash + Eq + PartialOrd + Clone>(
     Some(node)
 }
 
-fn find_smallest_color(mut neighbor_colors: Vec<usize>) -> usize {
+fn find_smallest_color(neighbor_colors: BTreeSet<usize>) -> usize {
     let n_colors = neighbor_colors.len();
-    neighbor_colors.sort();
     neighbor_colors
         .into_iter()
         .enumerate()
@@ -726,7 +893,7 @@ fn find_smallest_color(mut neighbor_colors: Vec<usize>) -> usize {
 mod tests {
     use super::*;
 
-    impl<V> PartialEq<Vec<Op<V>>> for Block<V> {
+    impl<V: std::fmt::Debug> PartialEq<Vec<Op<V>>> for Block<V> {
         fn eq(&self, rhs: &Vec<Op<V>>) -> bool {
             self.block.borrow_mut().ops == *rhs
         }
@@ -1066,7 +1233,7 @@ mod tests {
             'C' => set!['A', 'B']
         ];
         assert_eq!(
-            greedy_coloring(&graph, HashMap::new()),
+            greedy_coloring(&graph, map![], &vec![]),
             map!['A' => 2, 'B' => 1, 'C' => 0]
         );
     }
@@ -1079,7 +1246,7 @@ mod tests {
             'C' => set![]
         ];
         assert_eq!(
-            greedy_coloring(&graph, HashMap::new()),
+            greedy_coloring(&graph, map![], &vec![]),
             map!['A' => 0, 'B' => 0, 'C' => 0]
         );
     }
@@ -1094,7 +1261,7 @@ mod tests {
             'E' => set!['D', 'A']
         ];
         assert_eq!(
-            greedy_coloring(&graph, HashMap::new()),
+            greedy_coloring(&graph, map![], &vec![]),
             map!['A' => 2, 'B' => 1, 'C' => 0, 'D' => 1, 'E' => 0]
         );
     }
@@ -1108,13 +1275,56 @@ mod tests {
         let y = entry.append_parameter();
         let z = entry.append_parameter();
 
-        entry.tail_call(&f, &[&z, &x, &y]);
+        let r = entry.call(&f, &[&z, &x, &y]);
+        entry.terminate(&r);
 
         tu.verify(&entry);
 
         tu.allocate_registers(&entry);
 
-        println!("{:?}", tu);
-        panic!()
+        assert_eq!(
+            tu.unit.borrow().register_assignment,
+            map![
+            VarName(0) => 0,
+            VarName(1) => FIRST_ARG_REGISTER + 1,
+            VarName(2) => FIRST_ARG_REGISTER + 2,
+            VarName(3) => FIRST_ARG_REGISTER + 0,
+            VarName(4) => RETURN_VALUE_REGISTER]
+        );
+    }
+
+    #[test]
+    fn assign_call_register_conflict() {
+        let tu = TranslationUnit::<i64>::new();
+        let entry = tu.new_block();
+        let v0 = entry.append_parameter();
+        let v1 = entry.append_parameter();
+        let v2 = entry.append_parameter();
+        let v3 = entry.append_parameter();
+
+        let _4 = entry.call(&v0, &[&v1, &v2, &v3]);
+
+        entry.tail_call(&v0, &[&v3, &v2, &v1]);
+
+        tu.verify(&entry);
+
+        tu.allocate_registers(&entry);
+
+        tu.verify(&entry);
+
+        assert_eq!(
+            tu.unit.borrow().register_assignment,
+            map![
+                VarName(0) => 4,
+                VarName(1) => FIRST_ARG_REGISTER + 0,
+                VarName(2) => FIRST_ARG_REGISTER + 1,
+                VarName(3) => FIRST_ARG_REGISTER + 2,
+                VarName(4) => RETURN_VALUE_REGISTER,
+                VarName(5) => 0,
+                VarName(6) => FIRST_ARG_REGISTER + 0,
+                VarName(7) => 3,
+                VarName(8) => FIRST_ARG_REGISTER + 2,
+            ]
+        );
     }
 }
