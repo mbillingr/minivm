@@ -6,9 +6,11 @@ use std::iter::once;
 use std::rc::{Rc, Weak};
 
 const RETURN_TARGET_REGISTER: usize = 0;
-const FIRST_GENERAL_PURPOSE_REGISTER: usize = 1;
-const RETURN_VALUE_REGISTER: usize = 1;
-const FIRST_ARG_REGISTER: usize = 2;
+const STACK_POINTER_REGISTER: usize = 1;
+const STACK_REGISTER: usize = 2;
+const FIRST_GENERAL_PURPOSE_REGISTER: usize = 3;
+const RETURN_VALUE_REGISTER: usize = 3;
+const FIRST_ARG_REGISTER: usize = 4;
 
 macro_rules! set {
     ( ) => { ::std::collections::HashSet::new() };
@@ -82,6 +84,8 @@ impl<V: std::fmt::Debug> TranslationUnit<V> {
         entry_block.preassign_function_arg_registers(&mut preassignment);
         println!("{:?}", entry_block.block.borrow().ops);
         let liveness_graph = LivenessGraph::build(entry_block);
+        println!("{:?}", preassignment);
+        println!("{:?}", liveness_graph.edges);
         self.unit.borrow_mut().register_assignment = greedy_coloring(
             &liveness_graph.edges,
             preassignment,
@@ -437,7 +441,7 @@ impl VarName {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Function<V> {
     data: Rc<RefCell<FunctionData<V>>>,
 }
@@ -447,7 +451,7 @@ impl<V: std::fmt::Debug> Function<V> {
         Function {
             data: Rc::new(RefCell::new(FunctionData {
                 entry_block,
-                compiled: false,
+                compiled: CompilationStatus::Uncompiled,
             })),
         }
     }
@@ -466,7 +470,7 @@ impl Function<PrimitiveValue> {
 #[derive(Debug)]
 struct FunctionData<V> {
     entry_block: Block<V>,
-    compiled: bool,
+    compiled: CompilationStatus<V>,
 }
 
 impl<V: std::fmt::Debug> FunctionData<V> {
@@ -477,11 +481,15 @@ impl<V: std::fmt::Debug> FunctionData<V> {
 
 impl FunctionData<PrimitiveValue> {
     fn compile(&mut self) {
-        assert!(!self.compiled);
+        match self.compiled {
+            CompilationStatus::Uncompiled => {}
+            _ => panic!("Cant't compile function again"),
+        }
         let unit = self.entry_block.unit.upgrade();
         unit.verify(&self.entry_block);
 
         // pre-assign registers to parameters
+        let mut insertion_offset = 0;
         for (param, reg) in self
             .entry_block
             .params()
@@ -493,15 +501,40 @@ impl FunctionData<PrimitiveValue> {
                     panic!("register assignment conflict");
                 }
             }
-            unit.set_allocation(&param, reg);
+            let tmp_var1 = self.entry_block.new_var();
+            let tmp_var2 = self.entry_block.new_var();
+            unit.set_allocation(&tmp_var1, reg);
+            self.entry_block
+                .block
+                .borrow_mut()
+                .ops
+                .insert(insertion_offset, Op::Copy(param.name, tmp_var2.name));
+            self.entry_block
+                .block
+                .borrow_mut()
+                .ops
+                .insert(insertion_offset, Op::Copy(tmp_var2.name, tmp_var1.name));
+            insertion_offset += 1;
         }
 
         unit.allocate_registers(&self.entry_block);
 
-        compile_block(&self.entry_block, &unit.unit.borrow().register_assignment);
+        let (code, placeholders) =
+            compile_block(&self.entry_block, &unit.unit.borrow().register_assignment);
 
-        self.compiled = true;
+        if placeholders.is_empty() {
+            self.compiled = CompilationStatus::Compiled(code);
+        } else {
+            self.compiled = CompilationStatus::Unresolved(code, placeholders);
+        }
     }
+}
+
+#[derive(Debug)]
+enum CompilationStatus<V> {
+    Uncompiled,
+    Unresolved(Vec<vm::Op>, Vec<(usize, Function<V>)>),
+    Compiled(Vec<vm::Op>),
 }
 
 #[derive(Debug)]
@@ -672,22 +705,55 @@ impl<V: std::fmt::Debug> Op<V> {
 }
 
 impl Op<PrimitiveValue> {
-    fn compile(&self, register_assignment: &HashMap<VarName, usize>) -> Vec<vm::Op> {
+    fn compile(
+        &self,
+        register_assignment: &HashMap<VarName, usize>,
+    ) -> (Vec<vm::Op>, Vec<(usize, Function<PrimitiveValue>)>) {
         use vm::Operand::R;
 
         let r = |var| *register_assignment.get(var).unwrap() as vm::Register;
 
-        match self {
+        let mut placeholders = vec![];
+
+        let ops = match self {
             Op::Const(z, c) => vec![vm::Op::Const(r(z), *c)],
-            Op::Copy(z, a) if z == a => vec![],
+            Op::Copy(z, a) if r(z) == r(a) => vec![],
             Op::Copy(z, a) => vec![vm::Op::Copy(r(z), r(a))],
             Op::Add(z, a, b) => vec![vm::Op::Add(r(z), r(a), R(r(b)))],
             Op::Return(a) => {
                 assert_eq!(r(a), RETURN_VALUE_REGISTER as vm::Register);
                 vec![vm::Op::Jmp(R(RETURN_TARGET_REGISTER as vm::Register))]
             }
+            Op::CallDynamic(z, f, args) => {
+                vec![
+                    // push RETURN_TARGET_REGISTER
+                    vm::Op::SetRec(
+                        STACK_REGISTER as vm::Register,
+                        R(STACK_POINTER_REGISTER as vm::Register),
+                        R(RETURN_TARGET_REGISTER as vm::Register),
+                    ),
+                    vm::Op::Inc(STACK_POINTER_REGISTER as vm::Register),
+                    // load return address and call function
+                    vm::Op::LoadLabel(RETURN_TARGET_REGISTER as vm::Register, 2),
+                    vm::Op::Jmp(R(r(f))),
+                    // pop RETURN_VALUE_REGISTER
+                    vm::Op::Dec(STACK_POINTER_REGISTER as vm::Register),
+                    vm::Op::GetRec(
+                        RETURN_TARGET_REGISTER as vm::Register,
+                        STACK_REGISTER as vm::Register,
+                        R(STACK_POINTER_REGISTER as vm::Register),
+                    ),
+                ]
+            }
+            Op::TailCallDynamic(f, args) => vec![vm::Op::Jmp(R(r(f)))],
+            Op::TailCall(f, args) => {
+                placeholders.push((0, f.clone()));
+                vec![vm::Op::Term]
+            }
             _ => unimplemented!("{:?}", self),
-        }
+        };
+
+        (ops, placeholders)
     }
 }
 
@@ -739,7 +805,7 @@ impl LivenessGraph {
         }
     }
 
-    fn build<V>(block: &Block<V>) -> Self {
+    fn build<V: std::fmt::Debug>(block: &Block<V>) -> Self {
         let block_data = block.block.borrow();
 
         let mut subgraph = Self::new();
@@ -755,7 +821,7 @@ impl LivenessGraph {
         subgraph
     }
 
-    fn update<V>(&mut self, op: &Op<V>) {
+    fn update<V: std::fmt::Debug>(&mut self, op: &Op<V>) {
         match op {
             Op::Const(z, _) => {
                 self.liveset.remove(z);
@@ -780,6 +846,9 @@ impl LivenessGraph {
             Op::Branch(blk, args) => {
                 *self = Self::build(blk);
                 self.liveset.extend(args);
+                for (a, p) in args.iter().zip(blk.params()) {
+                    self.preference_pairs.push((*a, p.name));
+                }
             }
             Op::CondBranch(cond, blk1, args1, blk2, args2) => {
                 let subgraph1 = Self::build(blk1);
@@ -789,6 +858,13 @@ impl LivenessGraph {
                 self.liveset.insert(*cond);
                 self.liveset.extend(args1);
                 self.liveset.extend(args2);
+
+                for (a, p) in args1
+                    .iter()
+                    .zip(blk1.params().into_iter().chain(blk2.params()))
+                {
+                    self.preference_pairs.push((*a, p.name));
+                }
             }
             Op::Call(z, _, args) => {
                 self.liveset.remove(z);
@@ -924,18 +1000,25 @@ fn find_smallest_color(neighbor_colors: BTreeSet<usize>, start_color: usize) -> 
     i
 }
 
-fn compile_block(block: &Block<PrimitiveValue>, register_assignment: &HashMap<VarName, usize>) {
+fn compile_block(
+    block: &Block<PrimitiveValue>,
+    register_assignment: &HashMap<VarName, usize>,
+) -> (Vec<vm::Op>, Vec<(usize, Function<PrimitiveValue>)>) {
     let mut code = vec![];
+    let mut placeholders = vec![];
     for op in &block.block.borrow().ops {
-        code.extend(op.compile(register_assignment));
+        let (ops, phs) = op.compile(register_assignment);
+        placeholders.extend(phs.into_iter().map(|(i, f)| (i + code.len(), f)));
+        code.extend(ops);
     }
-    println!("{:?}", code);
-    unimplemented!()
+    (code, placeholders)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory::store_code_block;
+    use crate::virtual_machine::eval;
 
     impl<V: std::fmt::Debug> PartialEq<Vec<Op<V>>> for Block<V> {
         fn eq(&self, rhs: &Vec<Op<V>>) -> bool {
@@ -1386,7 +1469,28 @@ mod tests {
 
         func.compile();
 
-        panic!()
+        let code = if let CompilationStatus::Compiled(ref ops) = func.data.borrow().compiled {
+            store_code_block(ops.clone())
+        } else {
+            panic!("Not compiled")
+        };
+
+        let main = store_code_block(vec![
+            vm::Op::Const(
+                FIRST_ARG_REGISTER as vm::Register,
+                PrimitiveValue::Integer(24),
+            ),
+            vm::Op::Const(
+                1 + FIRST_ARG_REGISTER as vm::Register,
+                PrimitiveValue::Integer(18),
+            ),
+            vm::Op::LoadLabel(RETURN_TARGET_REGISTER as vm::Register, 2),
+            vm::Op::JmpFar(code),
+            vm::Op::Copy(0, RETURN_VALUE_REGISTER as vm::Register),
+            vm::Op::Term,
+        ]);
+
+        assert_eq!(eval(&main), PrimitiveValue::Integer(42));
     }
 
     #[test]
