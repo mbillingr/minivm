@@ -5,12 +5,12 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::iter::once;
 use std::rc::{Rc, Weak};
 
-const RETURN_TARGET_REGISTER: usize = 0;
-const STACK_POINTER_REGISTER: usize = 1;
-const STACK_REGISTER: usize = 2;
-const FIRST_GENERAL_PURPOSE_REGISTER: usize = 3;
-const RETURN_VALUE_REGISTER: usize = 3;
-const FIRST_ARG_REGISTER: usize = 4;
+const RETURN_TARGET_REGISTER: vm::Register = 0;
+const STACK_POINTER_REGISTER: vm::Register = 1;
+const STACK_REGISTER: vm::Register = 2;
+const FIRST_GENERAL_PURPOSE_REGISTER: vm::Register = 3;
+const RETURN_VALUE_REGISTER: vm::Register = 3;
+const FIRST_ARG_REGISTER: vm::Register = 4;
 
 macro_rules! set {
     ( ) => { ::std::collections::HashSet::new() };
@@ -94,7 +94,7 @@ impl<V: std::fmt::Debug> TranslationUnit<V> {
         );
     }
 
-    pub fn get_allocation(&self, var: impl Into<VarName>) -> Option<usize> {
+    pub fn get_allocation(&self, var: impl Into<VarName>) -> Option<vm::Register> {
         self.unit
             .borrow()
             .register_assignment
@@ -102,7 +102,7 @@ impl<V: std::fmt::Debug> TranslationUnit<V> {
             .cloned()
     }
 
-    pub fn set_allocation(&self, var: impl Into<VarName>, reg: usize) {
+    pub fn set_allocation(&self, var: impl Into<VarName>, reg: vm::Register) {
         self.unit
             .borrow_mut()
             .register_assignment
@@ -248,7 +248,7 @@ impl<V: std::fmt::Debug> Block<V> {
         }
     }
 
-    fn preassign_function_arg_registers(&self, assignment: &mut HashMap<VarName, usize>) {
+    fn preassign_function_arg_registers(&self, assignment: &mut HashMap<VarName, vm::Register>) {
         loop {
             let mut conflicts = vec![];
             {
@@ -385,7 +385,7 @@ impl<V> WeakUnit<V> {
 struct TransUnitData<V> {
     blocks: Vec<Block<V>>,
     next_var: VarName,
-    register_assignment: HashMap<VarName, usize>,
+    register_assignment: HashMap<VarName, vm::Register>,
 }
 
 impl<V> TransUnitData<V> {
@@ -461,6 +461,12 @@ impl<V: std::fmt::Debug> Function<V> {
     }
 }
 
+impl<V> std::cmp::PartialEq for Function<V> {
+    fn eq(&self, rhs: &Self) -> bool {
+        Rc::ptr_eq(&self.data, &rhs.data)
+    }
+}
+
 impl Function<PrimitiveValue> {
     fn compile(&self) {
         self.data.borrow_mut().compile()
@@ -530,7 +536,7 @@ impl FunctionData<PrimitiveValue> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum CompilationStatus<V> {
     Uncompiled,
     Unresolved(Vec<vm::Op>, Vec<(usize, Function<V>)>),
@@ -707,7 +713,7 @@ impl<V: std::fmt::Debug> Op<V> {
 impl Op<PrimitiveValue> {
     fn compile(
         &self,
-        register_assignment: &HashMap<VarName, usize>,
+        register_assignment: &HashMap<VarName, vm::Register>,
     ) -> (Vec<vm::Op>, Vec<(usize, Function<PrimitiveValue>)>) {
         use vm::Operand::R;
 
@@ -905,10 +911,10 @@ fn join_edges<K: std::hash::Hash + Eq>(
 
 fn greedy_coloring<K: std::hash::Hash + Eq + PartialOrd + Clone>(
     graph: &HashMap<K, HashSet<K>>,
-    mut assignment: HashMap<K, usize>,
+    mut assignment: HashMap<K, vm::Register>,
     preferences: &Vec<(K, K)>,
-    smallest_color: usize,
-) -> HashMap<K, usize> {
+    smallest_color: vm::Register,
+) -> HashMap<K, vm::Register> {
     let mut remaining_nodes: HashSet<_> = graph.keys().cloned().collect();
 
     while let Some(node) = next_node(graph, &mut remaining_nodes, &assignment) {
@@ -945,7 +951,7 @@ fn greedy_coloring<K: std::hash::Hash + Eq + PartialOrd + Clone>(
 fn next_node<K: std::hash::Hash + Eq + PartialOrd + Clone>(
     graph: &HashMap<K, HashSet<K>>,
     remaining_nodes: &mut HashSet<K>,
-    assignment: &HashMap<K, usize>,
+    assignment: &HashMap<K, vm::Register>,
 ) -> Option<K> {
     if remaining_nodes.is_empty() {
         return None;
@@ -986,7 +992,10 @@ fn next_node<K: std::hash::Hash + Eq + PartialOrd + Clone>(
     Some(node)
 }
 
-fn find_smallest_color(neighbor_colors: BTreeSet<usize>, start_color: usize) -> usize {
+fn find_smallest_color(
+    neighbor_colors: BTreeSet<vm::Register>,
+    start_color: vm::Register,
+) -> vm::Register {
     let n_colors = neighbor_colors.len();
     let mut i = start_color;
     for c in neighbor_colors {
@@ -1002,7 +1011,7 @@ fn find_smallest_color(neighbor_colors: BTreeSet<usize>, start_color: usize) -> 
 
 fn compile_block(
     block: &Block<PrimitiveValue>,
-    register_assignment: &HashMap<VarName, usize>,
+    register_assignment: &HashMap<VarName, vm::Register>,
 ) -> (Vec<vm::Op>, Vec<(usize, Function<PrimitiveValue>)>) {
     let mut code = vec![];
     let mut placeholders = vec![];
@@ -1495,6 +1504,7 @@ mod tests {
 
     #[test]
     fn compile_function_dynamic_call() {
+        use vm::Operand::R;
         let tu = TranslationUnit::<PrimitiveValue>::new();
         let entry = tu.new_block();
         let a = entry.append_parameter();
@@ -1507,6 +1517,27 @@ mod tests {
 
         func.compile();
 
-        panic!()
+        assert_eq!(
+            func.data.borrow().compiled,
+            CompilationStatus::Compiled(vec![
+                vm::Op::Copy(FIRST_GENERAL_PURPOSE_REGISTER, FIRST_ARG_REGISTER),
+                vm::Op::Copy(FIRST_ARG_REGISTER, FIRST_ARG_REGISTER + 1),
+                vm::Op::SetRec(
+                    STACK_REGISTER,
+                    R(STACK_POINTER_REGISTER),
+                    R(RETURN_TARGET_REGISTER)
+                ),
+                vm::Op::Inc(STACK_POINTER_REGISTER),
+                vm::Op::LoadLabel(RETURN_TARGET_REGISTER, 2),
+                vm::Op::Jmp(R(FIRST_GENERAL_PURPOSE_REGISTER)),
+                vm::Op::Dec(STACK_POINTER_REGISTER),
+                vm::Op::GetRec(
+                    RETURN_TARGET_REGISTER,
+                    STACK_REGISTER,
+                    R(STACK_POINTER_REGISTER)
+                ),
+                vm::Op::Jmp(R(RETURN_TARGET_REGISTER)),
+            ])
+        );
     }
 }
