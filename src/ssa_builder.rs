@@ -63,13 +63,35 @@ impl<V: std::fmt::Debug> TranslationUnit<V> {
         }
     }
 
+    pub fn new_function(&self, entry_block: &Block<V>) -> Block<V> {
+        let param_block = self.new_block();
+        let eb = entry_block.block.borrow();
+
+        let func_params: Vec<_> = eb
+            .params
+            .iter()
+            .zip(FIRST_ARG_REGISTER..)
+            .map(|(_, r)| {
+                let param = param_block.new_var();
+                self.set_allocation(&param, r);
+                param
+            })
+            .collect();
+
+        let tmp_vars: Vec<_> = func_params.iter().map(|p| param_block.copy(p)).collect();
+
+        param_block.branch(entry_block, &tmp_vars[..]);
+
+        param_block
+    }
+
     pub fn new_block(&self) -> Block<V> {
         let block = Block::new(self);
         self.unit.borrow_mut().push_block(block.clone());
         block
     }
 
-    fn new_var_name(&mut self) -> VarName {
+    fn new_var_name(&self) -> VarName {
         self.unit.borrow_mut().new_var_name()
     }
 
@@ -82,10 +104,10 @@ impl<V: std::fmt::Debug> TranslationUnit<V> {
         let mut preassignment =
             std::mem::replace(&mut self.unit.borrow_mut().register_assignment, map![]);
         entry_block.preassign_function_arg_registers(&mut preassignment);
-        println!("{:?}", entry_block.block.borrow().ops);
+        //println!("{:?}", entry_block.block.borrow().ops);
         let liveness_graph = LivenessGraph::build(entry_block);
-        println!("{:?}", preassignment);
-        println!("{:?}", liveness_graph.edges);
+        //println!("{:?}", preassignment);
+        //println!("{:?}", liveness_graph.edges);
         self.unit.borrow_mut().register_assignment = greedy_coloring(
             &liveness_graph.edges,
             preassignment,
@@ -117,6 +139,12 @@ impl<V: std::fmt::Debug> TranslationUnit<V> {
 
 impl<V> From<&Var<V>> for VarName {
     fn from(var: &Var<V>) -> Self {
+        var.name
+    }
+}
+
+impl<V> From<&&Var<V>> for VarName {
+    fn from(var: &&Var<V>) -> Self {
         var.name
     }
 }
@@ -184,12 +212,23 @@ impl<V: std::fmt::Debug> Block<V> {
         var
     }
 
+    pub fn equals(&self, a: &Var<V>, b: &Var<V>) -> Var<V> {
+        let result = self.new_var();
+        self.block
+            .borrow_mut()
+            .append_op(Op::Equal(result.name, a.name, b.name));
+        result
+    }
+
     pub fn terminate(&self, x: &Var<V>) {
         self.block.borrow_mut().append_op(Op::Return(x.name));
     }
 
-    pub fn branch(&self, target: &Block<V>, args: &[&Var<V>]) {
-        let arg_names = args.iter().map(|a| a.name).collect();
+    pub fn branch<'a, T>(&self, target: &Block<V>, args: &'a [T])
+    where
+        &'a T: Into<VarName>,
+    {
+        let arg_names = args.iter().map(|a| a.into()).collect();
         self.block
             .borrow_mut()
             .append_op(Op::Branch(target.clone(), arg_names));
@@ -231,6 +270,22 @@ impl<V: std::fmt::Debug> Block<V> {
         self.block
             .borrow_mut()
             .append_op(Op::CallDynamic(ret.name, func.name, arg_names));
+        ret
+    }
+
+    pub fn tail_call_static(&self, func: &Block<V>, args: &[&Var<V>]) {
+        let arg_names = args.iter().map(|a| a.name).collect();
+        self.block
+            .borrow_mut()
+            .append_op(Op::TailCall(func.clone(), arg_names));
+    }
+
+    pub fn call_static(&self, func: &Block<V>, args: &[&Var<V>]) -> Var<V> {
+        let ret = self.new_var();
+        let arg_names = args.iter().map(|a| a.name).collect();
+        self.block
+            .borrow_mut()
+            .append_op(Op::Call(ret.name, func.clone(), arg_names));
         ret
     }
 
@@ -346,7 +401,7 @@ impl<V: std::fmt::Debug> Var<V> {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub struct BlockId(usize);
 
 #[derive(Debug)]
@@ -441,9 +496,22 @@ impl VarName {
     }
 }
 
-#[derive(Debug, Clone)]
-struct Function<V> {
+pub struct Function<V> {
     data: Rc<RefCell<FunctionData<V>>>,
+}
+
+impl<V> Clone for Function<V> {
+    fn clone(&self) -> Self {
+        Function {
+            data: self.data.clone(),
+        }
+    }
+}
+
+impl<V> std::fmt::Debug for Function<V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "Function<{:p}>", self.data.as_ptr())
+    }
 }
 
 impl<V: std::fmt::Debug> Function<V> {
@@ -467,16 +535,30 @@ impl<V> std::cmp::PartialEq for Function<V> {
     }
 }
 
-impl Function<PrimitiveValue> {
-    fn compile(&self) {
-        self.data.borrow_mut().compile()
+impl<V> Function<V> {
+    fn id(&self) -> FunctionId {
+        FunctionId(self.data.as_ptr() as usize)
+    }
+
+    fn entry_block(&self) -> Block<V> {
+        self.data.borrow().entry_block.clone()
     }
 }
+
+impl Function<PrimitiveValue> {
+    fn compile(&self, compiler: &mut Compiler) {
+        //self.data.borrow_mut().compile(compiler)
+        unimplemented!()
+    }
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+struct FunctionId(usize);
 
 #[derive(Debug)]
 struct FunctionData<V> {
     entry_block: Block<V>,
-    compiled: CompilationStatus<V>,
+    compiled: CompilationStatus,
 }
 
 impl<V: std::fmt::Debug> FunctionData<V> {
@@ -486,7 +568,7 @@ impl<V: std::fmt::Debug> FunctionData<V> {
 }
 
 impl FunctionData<PrimitiveValue> {
-    fn compile(&mut self) {
+    /*fn compile(&mut self, compiler: &mut Compiler) {
         match self.compiled {
             CompilationStatus::Uncompiled => {}
             _ => panic!("Cant't compile function again"),
@@ -525,22 +607,15 @@ impl FunctionData<PrimitiveValue> {
 
         unit.allocate_registers(&self.entry_block);
 
-        let (code, placeholders) =
-            compile_block(&self.entry_block, &unit.unit.borrow().register_assignment);
-
-        if placeholders.is_empty() {
-            self.compiled = CompilationStatus::Compiled(code);
-        } else {
-            self.compiled = CompilationStatus::Unresolved(code, placeholders);
-        }
-    }
+        let label = compiler.compile_block(&self.entry_block, &unit.unit.borrow().register_assignment);
+        self.compiled = CompilationStatus::Compiled(label);
+    }*/
 }
 
 #[derive(Debug, PartialEq)]
-enum CompilationStatus<V> {
+enum CompilationStatus {
     Uncompiled,
-    Unresolved(Vec<vm::Op>, Vec<(usize, Function<V>)>),
-    Compiled(Vec<vm::Op>),
+    Compiled(usize),
 }
 
 #[derive(Debug)]
@@ -549,14 +624,16 @@ enum Op<V> {
     Add(VarName, VarName, VarName),
     Mul(VarName, VarName, VarName),
 
+    Equal(VarName, VarName, VarName),
+
     Copy(VarName, VarName),
 
     Branch(Block<V>, Vec<VarName>),
     CondBranch(VarName, Block<V>, Vec<VarName>, Block<V>, Vec<VarName>),
 
     Return(VarName),
-    Call(VarName, Function<V>, Vec<VarName>),
-    TailCall(Function<V>, Vec<VarName>),
+    Call(VarName, Block<V>, Vec<VarName>),
+    TailCall(Block<V>, Vec<VarName>),
 
     CallDynamic(VarName, VarName, Vec<VarName>),
     TailCallDynamic(VarName, Vec<VarName>),
@@ -585,7 +662,7 @@ impl<V: std::fmt::Debug> Op<V> {
                     *v = new
                 }
             }
-            Op::Add(a, b, c) | Op::Mul(a, b, c) => {
+            Op::Add(a, b, c) | Op::Mul(a, b, c) | Op::Equal(a, b, c) => {
                 if a == &old {
                     *a = new
                 }
@@ -652,7 +729,7 @@ impl<V: std::fmt::Debug> Op<V> {
             Op::Const(v, _) => {
                 assigned_vars.insert(*v);
             }
-            Op::Add(z, a, b) | Op::Mul(z, a, b) => {
+            Op::Add(z, a, b) | Op::Mul(z, a, b) | Op::Equal(z, a, b) => {
                 assert!(assigned_vars.contains(a));
                 assert!(assigned_vars.contains(b));
                 assigned_vars.insert(*z);
@@ -707,59 +784,6 @@ impl<V: std::fmt::Debug> Op<V> {
                 }
             }
         }
-    }
-}
-
-impl Op<PrimitiveValue> {
-    fn compile(
-        &self,
-        register_assignment: &HashMap<VarName, vm::Register>,
-    ) -> (Vec<vm::Op>, Vec<(usize, Function<PrimitiveValue>)>) {
-        use vm::Operand::R;
-
-        let r = |var| *register_assignment.get(var).unwrap() as vm::Register;
-
-        let mut placeholders = vec![];
-
-        let ops = match self {
-            Op::Const(z, c) => vec![vm::Op::Const(r(z), *c)],
-            Op::Copy(z, a) if r(z) == r(a) => vec![],
-            Op::Copy(z, a) => vec![vm::Op::Copy(r(z), r(a))],
-            Op::Add(z, a, b) => vec![vm::Op::Add(r(z), r(a), R(r(b)))],
-            Op::Return(a) => {
-                assert_eq!(r(a), RETURN_VALUE_REGISTER as vm::Register);
-                vec![vm::Op::Jmp(R(RETURN_TARGET_REGISTER as vm::Register))]
-            }
-            Op::CallDynamic(z, f, args) => {
-                vec![
-                    // push RETURN_TARGET_REGISTER
-                    vm::Op::SetRec(
-                        STACK_REGISTER as vm::Register,
-                        R(STACK_POINTER_REGISTER as vm::Register),
-                        R(RETURN_TARGET_REGISTER as vm::Register),
-                    ),
-                    vm::Op::Inc(STACK_POINTER_REGISTER as vm::Register),
-                    // load return address and call function
-                    vm::Op::LoadLabel(RETURN_TARGET_REGISTER as vm::Register, 2),
-                    vm::Op::Jmp(R(r(f))),
-                    // pop RETURN_VALUE_REGISTER
-                    vm::Op::Dec(STACK_POINTER_REGISTER as vm::Register),
-                    vm::Op::GetRec(
-                        RETURN_TARGET_REGISTER as vm::Register,
-                        STACK_REGISTER as vm::Register,
-                        R(STACK_POINTER_REGISTER as vm::Register),
-                    ),
-                ]
-            }
-            Op::TailCallDynamic(f, args) => vec![vm::Op::Jmp(R(r(f)))],
-            Op::TailCall(f, args) => {
-                placeholders.push((0, f.clone()));
-                vec![vm::Op::Term]
-            }
-            _ => unimplemented!("{:?}", self),
-        };
-
-        (ops, placeholders)
     }
 }
 
@@ -832,7 +856,7 @@ impl LivenessGraph {
             Op::Const(z, _) => {
                 self.liveset.remove(z);
             }
-            Op::Add(z, a, b) | Op::Mul(z, a, b) => {
+            Op::Add(z, a, b) | Op::Mul(z, a, b) | Op::Equal(z, a, b) => {
                 self.liveset.remove(z);
                 self.liveset.insert(*a);
                 self.liveset.insert(*b);
@@ -1009,18 +1033,129 @@ fn find_smallest_color(
     i
 }
 
-fn compile_block(
-    block: &Block<PrimitiveValue>,
-    register_assignment: &HashMap<VarName, vm::Register>,
-) -> (Vec<vm::Op>, Vec<(usize, Function<PrimitiveValue>)>) {
-    let mut code = vec![];
-    let mut placeholders = vec![];
-    for op in &block.block.borrow().ops {
-        let (ops, phs) = op.compile(register_assignment);
-        placeholders.extend(phs.into_iter().map(|(i, f)| (i + code.len(), f)));
-        code.extend(ops);
+struct Compiler {
+    code: Vec<vm::Op>,
+    placeholders: HashMap<usize, Block<PrimitiveValue>>,
+    labels: HashMap<BlockId, isize>,
+    register_assignment: HashMap<VarName, vm::Register>,
+}
+
+impl Compiler {
+    pub fn new(register_assignment: HashMap<VarName, vm::Register>) -> Self {
+        Compiler {
+            code: vec![],
+            placeholders: map![],
+            labels: map![],
+            register_assignment,
+        }
     }
-    (code, placeholders)
+
+    fn current_pos(&self) -> isize {
+        self.code.len() as isize
+    }
+
+    fn compile_function(&mut self, func: &Function<PrimitiveValue>) {
+        let block = func.entry_block();
+        assert!(!self.labels.contains_key(&block.id()));
+        self.compile_block(&block);
+    }
+
+    fn compile_block(&mut self, block: &Block<PrimitiveValue>) -> isize {
+        if let Some(label) = self.labels.get(&block.id()) {
+            return *label;
+        }
+
+        let label = self.current_pos();
+        self.labels.insert(block.id(), label);
+        for op in &block.block.borrow().ops {
+            self.compile_op(op);
+        }
+        label
+    }
+
+    fn compile_op(&mut self, op: &Op<PrimitiveValue>) {
+        use vm::Operand::*;
+
+        let r = |var| *self.register_assignment.get(var).unwrap() as vm::Register;
+
+        match op {
+            Op::Const(z, c) => self.code.push(vm::Op::Const(r(z), *c)),
+            Op::Copy(z, a) if r(z) == r(a) => {}
+            Op::Copy(z, a) => self.code.push(vm::Op::Copy(r(z), r(a))),
+            Op::Add(z, a, b) => self.code.push(vm::Op::Add(r(z), r(a), R(r(b)))),
+            Op::Equal(z, a, b) => self.code.push(vm::Op::Equal(r(z), r(a), R(r(b)))),
+            Op::Branch(blk, args) => {
+                for (a, p) in args.iter().zip(&blk.block.borrow().params) {
+                    self.compile_op(&Op::Copy(*p, *a));
+                }
+                let pos = self.current_pos();
+                let label = self.compile_block(blk);
+                if label != pos {
+                    assert_eq!(pos, self.current_pos());
+                    self.code.push(vm::Op::Jmp(I(label - pos)))
+                }
+            }
+            Op::Return(a) => {
+                assert_eq!(r(a), RETURN_VALUE_REGISTER as vm::Register);
+                self.code
+                    .push(vm::Op::Jmp(R(RETURN_TARGET_REGISTER as vm::Register)));
+            }
+            Op::CallDynamic(z, f, args) => self.code.extend_from_slice(&[
+                // push RETURN_TARGET_REGISTER
+                vm::Op::SetRec(
+                    STACK_REGISTER as vm::Register,
+                    R(STACK_POINTER_REGISTER as vm::Register),
+                    R(RETURN_TARGET_REGISTER as vm::Register),
+                ),
+                vm::Op::Inc(STACK_POINTER_REGISTER as vm::Register),
+                // load return address and call function
+                vm::Op::LoadLabel(RETURN_TARGET_REGISTER as vm::Register, 2),
+                vm::Op::Jmp(R(r(f))),
+                // pop RETURN_VALUE_REGISTER
+                vm::Op::Dec(STACK_POINTER_REGISTER as vm::Register),
+                vm::Op::GetRec(
+                    RETURN_TARGET_REGISTER as vm::Register,
+                    STACK_REGISTER as vm::Register,
+                    R(STACK_POINTER_REGISTER as vm::Register),
+                ),
+            ]),
+            Op::TailCallDynamic(f, args) => self.code.push(vm::Op::Jmp(R(r(f)))),
+            Op::TailCall(f, args) => {
+                self.placeholders.insert(self.code.len(), f.clone());
+                self.code.push(vm::Op::Term);
+            }
+            _ => unimplemented!("{:?}", op),
+        }
+    }
+}
+
+fn link(compilers: &[Compiler], labels: &[isize]) -> (Vec<vm::Op>, Vec<isize>) {
+    let mut code = vec![];
+    let mut placeholders = map![];
+    let mut new_labels = vec![];
+    let mut block_labels = map![];
+    for (comp, label) in compilers.iter().zip(labels) {
+        let offset = code.len();
+        code.extend(comp.code.clone());
+        placeholders.extend(
+            comp.placeholders
+                .iter()
+                .map(|(idx, blk)| (*idx + offset, blk)),
+        );
+        block_labels.extend(
+            comp.labels
+                .iter()
+                .map(|(blkid, l)| (blkid, l + offset as isize)),
+        );
+        new_labels.push(label + offset as isize);
+    }
+
+    for (idx, blk) in placeholders {
+        let label = *block_labels.get(&blk.id()).expect("Unresolved label");
+        code[idx] = vm::Op::Jmp(vm::Operand::I(label - idx as isize));
+    }
+
+    (code, new_labels)
 }
 
 #[cfg(test)]
@@ -1095,7 +1230,7 @@ mod tests {
         let entry = tu.new_block();
         let exit = tu.new_block();
         let x = entry.append_parameter();
-        entry.branch(&exit, &[]);
+        entry.branch::<Var<()>>(&exit, &[]);
         exit.terminate(&x);
 
         tu.verify(&entry);
@@ -1128,7 +1263,7 @@ mod tests {
         let tu = TranslationUnit::<()>::new();
         let entry = tu.new_block();
         let exit = tu.new_block();
-        entry.branch(&exit, &[]);
+        entry.branch::<Var<()>>(&exit, &[]);
         let y = exit.append_parameter();
         exit.terminate(&y);
         tu.verify(&entry);
@@ -1223,9 +1358,9 @@ mod tests {
         let c = entry.append_parameter();
         entry.branch_conditionally(&c, &yes, &[], &no, &[]);
         let _ = yes.constant(());
-        yes.branch(&exit, &[]);
+        yes.branch::<Var<()>>(&exit, &[]);
         let x = no.constant(());
-        no.branch(&exit, &[]);
+        no.branch::<Var<()>>(&exit, &[]);
         exit.terminate(&x);
         tu.verify(&entry);
     }
@@ -1240,8 +1375,8 @@ mod tests {
         let c = entry.append_parameter();
         let x = entry.append_parameter();
         entry.branch_conditionally(&c, &yes, &[], &no, &[]);
-        yes.branch(&exit, &[]);
-        no.branch(&exit, &[]);
+        yes.branch::<Var<()>>(&exit, &[]);
+        no.branch::<Var<()>>(&exit, &[]);
         exit.terminate(&x);
 
         tu.verify(&entry);
@@ -1465,6 +1600,73 @@ mod tests {
     }
 
     #[test]
+    fn compile_branch() {
+        use vm::Operand::R;
+
+        let tu = TranslationUnit::<PrimitiveValue>::new();
+        let entry = tu.new_block();
+        let exit = tu.new_block();
+        let x = entry.append_parameter();
+        let z = entry.append_parameter();
+        entry.branch(&exit, &[&x]);
+        let y = exit.append_parameter();
+        exit.terminate(&exit.add(&y, &z));
+
+        tu.verify(&entry);
+        tu.allocate_registers(&entry);
+
+        let mut compiler = Compiler::new(tu.unit.borrow().register_assignment.clone());
+        compiler.compile_block(&entry);
+
+        assert_eq!(
+            compiler.code,
+            vec![
+                vm::Op::Add(
+                    RETURN_VALUE_REGISTER,
+                    FIRST_GENERAL_PURPOSE_REGISTER + 1,
+                    R(FIRST_GENERAL_PURPOSE_REGISTER)
+                ),
+                vm::Op::Jmp(R(RETURN_TARGET_REGISTER))
+            ]
+        );
+    }
+
+    #[test]
+    fn compile_branch_to_existing_block() {
+        use vm::Operand::*;
+
+        let tu = TranslationUnit::<PrimitiveValue>::new();
+        let entry = tu.new_block();
+        let exit = tu.new_block();
+        let x = entry.append_parameter();
+        let z = entry.append_parameter();
+        entry.branch(&exit, &[&x]);
+        let y = exit.append_parameter();
+        exit.terminate(&exit.add(&y, &z));
+
+        tu.verify(&entry);
+        tu.allocate_registers(&entry);
+
+        let mut compiler = Compiler::new(tu.unit.borrow().register_assignment.clone());
+        compiler.compile_block(&exit);
+        let label = compiler.compile_block(&entry);
+
+        assert_eq!(label, 2);
+        assert_eq!(
+            compiler.code,
+            vec![
+                vm::Op::Add(
+                    RETURN_VALUE_REGISTER,
+                    FIRST_GENERAL_PURPOSE_REGISTER + 1,
+                    R(FIRST_GENERAL_PURPOSE_REGISTER)
+                ),
+                vm::Op::Jmp(R(RETURN_TARGET_REGISTER)),
+                vm::Op::Jmp(I(-2))
+            ]
+        );
+    }
+
+    #[test]
     fn compile_function() {
         let tu = TranslationUnit::<PrimitiveValue>::new();
         let entry = tu.new_block();
@@ -1474,16 +1676,14 @@ mod tests {
         let c = entry.add(&a, &b);
         entry.return_(&c);
 
-        let func = Function::new(entry);
+        let func = tu.new_function(&entry);
 
-        func.compile();
+        tu.allocate_registers(&func);
 
-        let code = if let CompilationStatus::Compiled(ref ops) = func.data.borrow().compiled {
-            store_code_block(ops.clone())
-        } else {
-            panic!("Not compiled")
-        };
+        let mut compiler = Compiler::new(tu.unit.borrow().register_assignment.clone());
+        compiler.compile_block(&func);
 
+        let code = store_code_block(compiler.code);
         let main = store_code_block(vec![
             vm::Op::Const(
                 FIRST_ARG_REGISTER as vm::Register,
@@ -1513,13 +1713,16 @@ mod tests {
         let c = entry.call(&a, &[&b]);
         entry.return_(&c);
 
-        let func = Function::new(entry);
+        let func = tu.new_function(&entry);
 
-        func.compile();
+        tu.allocate_registers(&func);
+
+        let mut compiler = Compiler::new(tu.unit.borrow().register_assignment.clone());
+        compiler.compile_block(&func);
 
         assert_eq!(
-            func.data.borrow().compiled,
-            CompilationStatus::Compiled(vec![
+            compiler.code,
+            vec![
                 vm::Op::Copy(FIRST_GENERAL_PURPOSE_REGISTER, FIRST_ARG_REGISTER),
                 vm::Op::Copy(FIRST_ARG_REGISTER, FIRST_ARG_REGISTER + 1),
                 vm::Op::SetRec(
@@ -1537,7 +1740,72 @@ mod tests {
                     R(STACK_POINTER_REGISTER)
                 ),
                 vm::Op::Jmp(R(RETURN_TARGET_REGISTER)),
-            ])
+            ]
         );
     }
+
+    #[test]
+    fn compile_function_static_call() {
+        use vm::Operand::R;
+        let tu1 = TranslationUnit::<PrimitiveValue>::new();
+        let entry1 = tu1.new_block();
+        let a = entry1.append_parameter();
+        entry1.return_(&a);
+        let func1 = tu1.new_function(&entry1);
+
+        let tu2 = TranslationUnit::<PrimitiveValue>::new();
+        let entry2 = tu2.new_block();
+        let b = entry2.constant(PrimitiveValue::Integer(42));
+        entry2.tail_call_static(&func1, &[&b]);
+        let func2 = tu2.new_function(&entry2);
+
+        tu2.allocate_registers(&func2);
+        let mut compiler2 = Compiler::new(tu2.unit.borrow().register_assignment.clone());
+        let l2 = compiler2.compile_block(&func2);
+
+        tu1.allocate_registers(&func1);
+        let mut compiler1 = Compiler::new(tu1.unit.borrow().register_assignment.clone());
+        let l1 = compiler1.compile_block(&func1);
+
+        let code = link(&[compiler1, compiler2], &[l1, l2]);
+
+        println!("{:?}", code);
+
+        unimplemented!()
+    }
+
+    /*#[test]
+    fn compile_mutual_recursion() {
+        use vm::Operand::R;
+        let tu = TranslationUnit::<PrimitiveValue>::new();
+        let even_entry = tu.new_block();
+        let is_even = tu.new_block();
+        let not_even = tu.new_block();
+        let odd_entry = tu.new_block();
+        let is_odd = tu.new_block();
+        let not_odd = tu.new_block();
+        let even = Function::new(even_entry.clone());
+        let odd = Function::new(odd_entry.clone());
+
+        let x = even_entry.append_parameter();
+        let e = even_entry.equals(&x, &even_entry.constant(PrimitiveValue::Integer(0)));
+        even_entry.branch_conditionally(&e, &is_even, &[], &not_even, &[]);
+        is_even.return_(&is_even.constant(PrimitiveValue::True));
+        not_even.tail_call_static(&odd, &[&not_even.add(&x, &not_even.constant(PrimitiveValue::Integer(-1)))]);
+        //not_even.terminate(&not_even.add(&x, &not_even.constant(PrimitiveValue::Integer(-1))));
+
+        let y = odd_entry.append_parameter();
+        let o = odd_entry.equals(&y, &odd_entry.constant(PrimitiveValue::Integer(0)));
+        odd_entry.branch_conditionally(&o, &is_odd, &[], &not_odd, &[]);
+        is_odd.return_(&is_odd.constant(PrimitiveValue::False));
+        not_odd.tail_call_static(&odd, &[&not_odd.add(&y, &not_odd.constant(PrimitiveValue::Integer(-1)))]);
+        //not_odd.terminate(&y);
+
+        tu.verify(&even_entry);
+        tu.verify(&odd_entry);
+
+        let mut compiler = Compiler::new();
+        even.compile(&mut compiler);
+        //odd.compile(&mut compiler);
+    }*/
 }
