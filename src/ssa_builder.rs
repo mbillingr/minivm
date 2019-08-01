@@ -5,12 +5,12 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::iter::once;
 use std::rc::{Rc, Weak};
 
-const RETURN_TARGET_REGISTER: vm::Register = 0;
-const STACK_POINTER_REGISTER: vm::Register = 1;
-const STACK_REGISTER: vm::Register = 2;
+pub const RETURN_TARGET_REGISTER: vm::Register = 0;
+pub const STACK_POINTER_REGISTER: vm::Register = 1;
+pub const STACK_REGISTER: vm::Register = 2;
 const FIRST_GENERAL_PURPOSE_REGISTER: vm::Register = 3;
-const RETURN_VALUE_REGISTER: vm::Register = 3;
-const FIRST_ARG_REGISTER: vm::Register = 4;
+pub const RETURN_VALUE_REGISTER: vm::Register = 3;
+pub const FIRST_ARG_REGISTER: vm::Register = 4;
 
 macro_rules! set {
     ( ) => { ::std::collections::HashSet::new() };
@@ -1129,6 +1129,28 @@ impl Compiler {
                     R(STACK_POINTER_REGISTER as vm::Register),
                 ),
             ]),
+            Op::Call(z, f, args) => {
+                self.placeholders.insert(self.code.len() + 3, f.clone());
+                self.code.extend_from_slice(&[
+                    // push RETURN_TARGET_REGISTER
+                    vm::Op::SetRec(
+                        STACK_REGISTER as vm::Register,
+                        R(STACK_POINTER_REGISTER as vm::Register),
+                        R(RETURN_TARGET_REGISTER as vm::Register),
+                    ),
+                    vm::Op::Inc(STACK_POINTER_REGISTER as vm::Register),
+                    // load return address and call function
+                    vm::Op::LoadLabel(RETURN_TARGET_REGISTER as vm::Register, 2),
+                    vm::Op::Term,
+                    // pop RETURN_VALUE_REGISTER
+                    vm::Op::Dec(STACK_POINTER_REGISTER as vm::Register),
+                    vm::Op::GetRec(
+                        RETURN_TARGET_REGISTER as vm::Register,
+                        STACK_REGISTER as vm::Register,
+                        R(STACK_POINTER_REGISTER as vm::Register),
+                    ),
+                ]);
+            }
             Op::TailCallDynamic(f, args) => self.code.push(vm::Op::Jmp(R(r(f)))),
             Op::TailCall(f, args) => {
                 self.placeholders.insert(self.code.len(), f.clone());

@@ -29,6 +29,7 @@ enum Cexp {
     Atomic(Aexp),
     PrimitiveAdd(Aexp, Aexp),
     PrimitiveMul(Aexp, Aexp),
+    Apply(String, Vec<Aexp>),
 }
 
 enum Aexp {
@@ -91,8 +92,9 @@ impl FixCompiler {
 
         let mut body_tu = TranslationUnit::new();
         let body_block = body_tu.new_block();
-        let result = self.compile_expr(&prog.body, &body_block);
-        body_block.return_(&result);
+        if let Some(result) = self.compile_expr(&prog.body, &body_block) {
+            body_block.return_(&result);
+        }
         let (c, l) = body_tu.compile_function(&body_block);
         compilers.push(c);
         labels.push(l);
@@ -104,8 +106,9 @@ impl FixCompiler {
             .zip(body_blocks)
             .zip(trans_units)
         {
-            let ret = self.compile_expr(&fdef.body, &code);
-            code.return_(&ret);
+            if let Some(ret) = self.compile_expr(&fdef.body, &code) {
+                code.return_(&ret);
+            }
 
             let (c, l) = tu.compile_function(&entry);
             compilers.push(c);
@@ -119,12 +122,12 @@ impl FixCompiler {
         code
     }
 
-    fn compile_expr(&mut self, expr: &Expr, block: &Block) -> Var {
+    fn compile_expr(&mut self, expr: &Expr, block: &Block) -> Option<Var> {
         match expr {
-            Expr::Atomic(aexp) => self.compile_aexp(aexp, block),
-            Expr::Complex(cexp) => self.compile_cexp(cexp, block),
+            Expr::Atomic(aexp) => Some(self.compile_aexp(aexp, block)),
+            Expr::Complex(cexp) => self.compile_cexp(cexp, block, true),
             Expr::Let(varname, def, body) => {
-                let v = self.compile_cexp(def, block);
+                let v = self.compile_cexp(def, block, false).unwrap();
                 self.scope.push((varname.clone(), v));
                 let r = self.compile_expr(body, block);
                 self.scope.pop();
@@ -133,8 +136,8 @@ impl FixCompiler {
         }
     }
 
-    fn compile_cexp(&mut self, cexp: &Cexp, block: &Block) -> Var {
-        match cexp {
+    fn compile_cexp(&mut self, cexp: &Cexp, block: &Block, tail_pos: bool) -> Option<Var> {
+        Some(match cexp {
             Cexp::Atomic(aexp) => self.compile_aexp(aexp, block),
             Cexp::PrimitiveAdd(a, b) => {
                 block.add(&self.compile_aexp(a, block), &self.compile_aexp(b, block))
@@ -142,7 +145,18 @@ impl FixCompiler {
             Cexp::PrimitiveMul(a, b) => {
                 block.mul(&self.compile_aexp(a, block), &self.compile_aexp(b, block))
             }
-        }
+            Cexp::Apply(func, args) => {
+                let args: Vec<_> = args.iter().map(|a| self.compile_aexp(a, block)).collect();
+                let ref_args: Vec<_> = args.iter().collect();
+                let func = &self.funcs[func];
+                if tail_pos {
+                    block.tail_call_static(func, &ref_args);
+                    return None;
+                } else {
+                    block.call_static(func, &ref_args)
+                }
+            }
+        })
     }
 
     fn compile_aexp(&mut self, aexp: &Aexp, block: &Block) -> Var {
@@ -180,13 +194,29 @@ mod tests {
                 body: Cexp::PrimitiveMul(Aexp::Var("x".to_string()), Aexp::Var("x".to_string()))
                     .into(),
             }],
-            body: Aexp::Integer(42).into(),
+            //body: Cexp::Apply("sqr".to_string(), vec![Aexp::Integer(42)]).into(),
+            body: letvar(
+                "s",
+                Cexp::Apply("sqr".to_string(), vec![Aexp::Integer(3)]),
+                Cexp::Apply("sqr".to_string(), vec![Aexp::Var("s".to_string())]).into(),
+            ),
         };
 
         let mut c = FixCompiler::new();
         let code = c.compile_prog(&prog);
 
+        let main = store_code_block(vec![
+            vm::Op::Alloc(ssa_builder::STACK_REGISTER, 100),
+            vm::Op::Const(ssa_builder::STACK_POINTER_REGISTER, 0.into()),
+            vm::Op::LoadLabel(ssa_builder::RETURN_TARGET_REGISTER, 2),
+            vm::Op::JmpFar(code),
+            vm::Op::Copy(0, ssa_builder::RETURN_VALUE_REGISTER),
+            vm::Op::Term,
+        ]);
+
         println!("{:?}", code);
+        println!("{:?}", vm::eval(main));
+
         unimplemented!()
     }
 }
