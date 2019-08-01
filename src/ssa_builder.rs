@@ -486,7 +486,7 @@ impl<V: std::fmt::Debug> BlockData<V> {
 }
 
 #[derive(Debug, Copy, Clone, Default, PartialOrd, PartialEq, Eq, Hash)]
-struct VarName(usize);
+pub struct VarName(usize);
 
 impl VarName {
     fn new_name(&mut self) -> Self {
@@ -1033,7 +1033,16 @@ fn find_smallest_color(
     i
 }
 
-struct Compiler {
+impl TranslationUnit<PrimitiveValue> {
+    pub fn compile_function(&mut self, entry_block: &Block<PrimitiveValue>) -> (Compiler, isize) {
+        self.allocate_registers(entry_block);
+        let mut compiler = Compiler::new(self.unit.borrow().register_assignment.clone());
+        let label = compiler.compile_block(&entry_block);
+        (compiler, label)
+    }
+}
+
+pub struct Compiler {
     code: Vec<vm::Op>,
     placeholders: HashMap<usize, Block<PrimitiveValue>>,
     labels: HashMap<BlockId, isize>,
@@ -1054,7 +1063,7 @@ impl Compiler {
         self.code.len() as isize
     }
 
-    fn compile_function(&mut self, func: &Function<PrimitiveValue>) {
+    pub fn compile_function(&mut self, func: &Function<PrimitiveValue>) {
         let block = func.entry_block();
         assert!(!self.labels.contains_key(&block.id()));
         self.compile_block(&block);
@@ -1083,6 +1092,7 @@ impl Compiler {
             Op::Copy(z, a) if r(z) == r(a) => {}
             Op::Copy(z, a) => self.code.push(vm::Op::Copy(r(z), r(a))),
             Op::Add(z, a, b) => self.code.push(vm::Op::Add(r(z), r(a), R(r(b)))),
+            Op::Mul(z, a, b) => self.code.push(vm::Op::Mul(r(z), r(a), R(r(b)))),
             Op::Equal(z, a, b) => self.code.push(vm::Op::Equal(r(z), r(a), R(r(b)))),
             Op::Branch(blk, args) => {
                 for (a, p) in args.iter().zip(&blk.block.borrow().params) {
@@ -1129,7 +1139,7 @@ impl Compiler {
     }
 }
 
-fn link(compilers: &[Compiler], labels: &[isize]) -> (Vec<vm::Op>, Vec<isize>) {
+pub fn link(compilers: &[Compiler], labels: &[isize]) -> (Vec<vm::Op>, Vec<isize>) {
     let mut code = vec![];
     let mut placeholders = map![];
     let mut new_labels = vec![];
@@ -1746,7 +1756,7 @@ mod tests {
 
     #[test]
     fn compile_function_static_call() {
-        use vm::Operand::R;
+        use vm::Operand::*;
         let tu1 = TranslationUnit::<PrimitiveValue>::new();
         let entry1 = tu1.new_block();
         let a = entry1.append_parameter();
@@ -1767,11 +1777,18 @@ mod tests {
         let mut compiler1 = Compiler::new(tu1.unit.borrow().register_assignment.clone());
         let l1 = compiler1.compile_block(&func1);
 
-        let code = link(&[compiler1, compiler2], &[l1, l2]);
+        let (code, labels) = link(&[compiler1, compiler2], &[l1, l2]);
 
-        println!("{:?}", code);
-
-        unimplemented!()
+        assert_eq!(
+            code,
+            vec![
+                vm::Op::Copy(FIRST_GENERAL_PURPOSE_REGISTER, FIRST_ARG_REGISTER),
+                vm::Op::Jmp(R(0)),
+                vm::Op::Const(FIRST_ARG_REGISTER, 42.into()),
+                vm::Op::Jmp(I(-3))
+            ]
+        );
+        assert_eq!(labels, vec![0, 2]);
     }
 
     /*#[test]
