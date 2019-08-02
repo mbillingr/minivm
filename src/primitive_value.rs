@@ -83,10 +83,10 @@ impl PrimitiveValue {
         }
     }
 
-    pub fn div(self, x: impl Into<PrimitiveValue>) -> (PrimitiveValue, PrimitiveValue) {
+    pub fn div(self, x: impl Into<PrimitiveValue>) -> PrimitiveValue {
         use PrimitiveValue::*;
         match (self, x.into()) {
-            (Integer(a), Integer(b)) => (Integer(a / b), Integer(a % b)),
+            (Integer(a), Integer(b)) => Integer(a / b),
             _ => panic!("Type Error"),
         }
     }

@@ -332,10 +332,6 @@ impl<'a> Linkage<'a> {
         }
     }
 
-    fn function() -> Self {
-        unimplemented!()
-    }
-
     fn compile(&self, block: Block) -> Block {
         if let Some(to) = self.branch_to {
             block.branch(to)

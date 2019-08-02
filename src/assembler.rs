@@ -1,4 +1,3 @@
-use crate::primitive_value::PrimitiveValue;
 use crate::virtual_machine::{Op, Operand};
 use std::collections::HashMap;
 
@@ -35,7 +34,7 @@ impl Assembler {
                     }
                     label_positions.insert(l.clone(), pos);
                 }
-                AsmOp::Opcode(op) => pos += 1,
+                AsmOp::Opcode(_) => pos += 1,
             }
         }
 
@@ -182,7 +181,6 @@ impl std::fmt::Display for Op<String> {
             Op::Cell(r, x) => write!(f, "r{} := [{}]", r, x),
             Op::GetCell(r, c) => write!(f, "r{} := @{}", r, c),
             Op::SetCell(c, x) => write!(f, "@{} := {}", c, x),
-            _ => write!(f, "<op>"),
         }
     }
 }

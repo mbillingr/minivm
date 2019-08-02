@@ -132,7 +132,7 @@ impl<V: std::fmt::Debug> TranslationUnit<V> {
             .insert(var.into(), reg);
     }
 
-    fn preassign_function_arg_registers(&self, entry_block: &Block<V>) {
+    pub fn preassign_function_arg_registers(&self, entry_block: &Block<V>) {
         let mut data = self.unit.borrow_mut();
         entry_block.preassign_function_arg_registers(&mut data.register_assignment);
     }
@@ -531,12 +531,6 @@ impl VarName {
         self.0 += 1;
         old_name
     }
-}
-
-#[derive(Debug, PartialEq)]
-enum CompilationStatus {
-    Uncompiled,
-    Compiled(usize),
 }
 
 #[derive(Debug)]
@@ -951,7 +945,6 @@ fn find_smallest_color(
     neighbor_colors: BTreeSet<vm::Register>,
     start_color: vm::Register,
 ) -> vm::Register {
-    let n_colors = neighbor_colors.len();
     let mut i = start_color;
     for c in neighbor_colors {
         if i < c {
@@ -971,11 +964,6 @@ impl TranslationUnit<PrimitiveValue> {
         compiler.compile_block(&entry_block);
         compiler
     }
-}
-
-enum Placeholder {
-    Jump(Block<PrimitiveValue>),
-    Const(Block<PrimitiveValue>),
 }
 
 pub struct Compiler {
@@ -1047,7 +1035,6 @@ impl Compiler {
             }
             Op::CondBranch(cond, yes, no) => {
                 let yes_label = self.block_label(yes);
-                let no_label = self.block_label(no);
                 let after_if = self.unique_label("__after_if");
 
                 self.assembly.op(vm::Op::JmpCond(I(yes_label), r!(cond)));
@@ -1069,12 +1056,7 @@ impl Compiler {
                 self.assembly
                     .op(vm::Op::Jmp(R(RETURN_TARGET_REGISTER as vm::Register)));
             }
-            Op::CallDynamic(_, f, args) => {
-                for (r, a) in (FIRST_ARG_REGISTER..).zip(args) {
-                    if r!(a) != r {
-                        self.assembly.op(vm::Op::Copy(r, r!(a)));
-                    }
-                }
+            Op::CallDynamic(_, f, _) => {
                 let after_call = self.unique_label("__after_call");
                 self.compile_push(RETURN_TARGET_REGISTER);
                 self.assembly.op(vm::Op::LoadLabel(
@@ -1085,12 +1067,7 @@ impl Compiler {
                 self.assembly.label(after_call);
                 self.compile_pop(RETURN_TARGET_REGISTER);
             }
-            Op::Call(_, f, args) => {
-                for (r, a) in (FIRST_ARG_REGISTER..).zip(args) {
-                    if r!(a) != r {
-                        self.assembly.op(vm::Op::Copy(r, r!(a)));
-                    }
-                }
+            Op::Call(_, f, _) => {
                 let func = self.block_label(f);
                 let after_call = self.unique_label("__after_call");
                 self.compile_push(RETURN_TARGET_REGISTER);
@@ -1102,8 +1079,8 @@ impl Compiler {
                 self.assembly.label(after_call);
                 self.compile_pop(RETURN_TARGET_REGISTER);
             }
-            Op::TailCallDynamic(f, args) => self.assembly.op(vm::Op::Jmp(R(r!(f)))),
-            Op::TailCall(f, args) => {
+            Op::TailCallDynamic(f, _) => self.assembly.op(vm::Op::Jmp(R(r!(f)))),
+            Op::TailCall(f, _) => {
                 let func = self.block_label(f);
                 self.assembly.op(vm::Op::Jmp(I(func)));
             }
@@ -1111,7 +1088,6 @@ impl Compiler {
                 let func = self.block_label(f);
                 self.assembly.op(vm::Op::LoadLabel(r!(z), func));
             }
-            _ => unimplemented!("{:?}", op),
         }
     }
 
@@ -1314,7 +1290,7 @@ mod tests {
         let yes = tu.new_block();
         let exit = tu.new_block();
         let c = entry.append_parameter();
-        let x = entry.append_parameter();
+        let _ = entry.append_parameter();
         entry.branch_conditionally(&c, &yes, &exit);
         let y = yes.append_parameter();
         let y = yes.add(&y, &yes.constant(100));
@@ -1722,11 +1698,11 @@ mod tests {
 
         tu2.allocate_registers(&func2);
         let mut compiler2 = Compiler::new(tu2.unit.borrow().register_assignment.clone());
-        let l2 = compiler2.compile_named("f2".to_string(), &func2);
+        compiler2.compile_named("f2".to_string(), &func2);
 
         tu1.allocate_registers(&func1);
         let mut compiler1 = Compiler::new(tu1.unit.borrow().register_assignment.clone());
-        let l1 = compiler1.compile_named("f1".to_string(), &func1);
+        compiler1.compile_named("f1".to_string(), &func1);
 
         let (code, labels) = link(&[compiler1, compiler2]);
 

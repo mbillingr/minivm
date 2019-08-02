@@ -1,6 +1,5 @@
 use crate::primitive_value::PrimitiveValue;
 use crate::virtual_machine::Op;
-use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::mem::replace;
 

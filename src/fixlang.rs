@@ -1,3 +1,5 @@
+//! FixLang is an intermediate language in A-Normal Form with top-level functions.
+
 use crate::memory::store_code_block;
 use crate::primitive_value::PrimitiveValue;
 use crate::ssa_builder;
@@ -8,25 +10,26 @@ use std::collections::HashMap;
 type Block = ssa_builder::Block<PrimitiveValue>;
 type Var = ssa_builder::Var<PrimitiveValue>;
 
-struct Prog {
+pub struct Prog {
     function_definitions: Vec<FunctionDefinition>,
     body: Expr,
 }
 
-struct FunctionDefinition {
+pub struct FunctionDefinition {
     name: String,
     params: Vec<String>,
     body: Expr,
 }
 
-enum Expr {
+pub enum Expr {
+    Begin(Vec<Expr>),
     Let(String, Cexp, Box<Expr>),
     LetMut(String, Cexp, Box<Expr>),
     Atomic(Aexp),
     Complex(Cexp),
 }
 
-enum Cexp {
+pub enum Cexp {
     Atomic(Aexp),
     ApplyPrimitive(PrimOp, Vec<Aexp>),
     ApplyStatic(String, Vec<Aexp>),
@@ -34,7 +37,7 @@ enum Cexp {
     If(Aexp, Box<Expr>, Box<Expr>),
 }
 
-enum Aexp {
+pub enum Aexp {
     Undefined,
     Integer(i64),
     Var(String),
@@ -59,7 +62,7 @@ impl From<Cexp> for Expr {
     }
 }
 
-enum PrimOp {
+pub enum PrimOp {
     Add,
     Sub,
     Mul,
@@ -118,7 +121,7 @@ enum VarSlot {
     Mutable(Var),
 }
 
-struct FixCompiler {
+pub struct FixCompiler {
     scope: Vec<(String, VarSlot)>,
     funcs: HashMap<String, Block>,
 }
@@ -131,7 +134,7 @@ impl FixCompiler {
         }
     }
 
-    fn compile_prog(&mut self, prog: &Prog) -> &'static [vm::Op] {
+    pub fn compile_prog(&mut self, prog: &Prog) -> &'static [vm::Op] {
         let mut entry_blocks = vec![];
         let mut body_blocks = vec![];
         let mut trans_units = vec![];
@@ -177,7 +180,7 @@ impl FixCompiler {
             compilers.push(c);
         }
 
-        let (code, offsets) = ssa_builder::link(&compilers);
+        let (code, _) = ssa_builder::link(&compilers);
 
         store_code_block(code)
     }
@@ -202,6 +205,19 @@ impl FixCompiler {
                 self.scope.pop();
                 (r, block)
             }
+            Expr::Begin(sequence) => match sequence.len() {
+                0 => self.compile_aexp(&Aexp::Undefined, block),
+                1 => self.compile_expr(&sequence[0], &block),
+                _ => {
+                    let (mut result, mut block) = self.compile_expr(&sequence[0], &block);
+                    for expr in &sequence[1..] {
+                        let (r, b) = self.compile_expr(expr, &block);
+                        result = r;
+                        block = b;
+                    }
+                    (result, block)
+                }
+            },
         }
     }
 
@@ -293,9 +309,7 @@ impl FixCompiler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ssa_builder::{
-        TranslationUnit, FIRST_ARG_REGISTER, RETURN_TARGET_REGISTER, RETURN_VALUE_REGISTER,
-    };
+    use crate::ssa_builder::{FIRST_ARG_REGISTER, RETURN_TARGET_REGISTER, RETURN_VALUE_REGISTER};
     use crate::virtual_machine::Operand::*;
 
     fn letvar(v: &str, cexp: Cexp, body: Expr) -> Expr {

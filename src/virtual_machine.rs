@@ -85,71 +85,37 @@ pub fn run(mut code: &'static [Op], storage: &RecordStorage) -> PrimitiveValue {
     loop {
         match code[pc] {
             Op::Term => return register[0],
-            Op::Nop => pc += 1,
-            Op::Debug(context, r) => {
-                println!("{}{:?}", context, register[r as usize]);
-                pc += 1;
-            }
-            Op::Const(r, value) => {
-                register[r as usize] = value;
-                pc += 1;
-            }
-            Op::Copy(dst, src) => {
-                register[dst as usize] = register[src as usize];
-                pc += 1;
-            }
-            Op::Inc(r) => {
-                register[r as usize] = register[r as usize].add(1);
-                pc += 1;
-            }
-            Op::Dec(r) => {
-                register[r as usize] = register[r as usize].sub(1);
-                pc += 1;
-            }
-            Op::Add(r, a, b) => {
-                register[r as usize] = register[a as usize].add(b.eval(&register));
-                pc += 1;
-            }
-            Op::Sub(r, a, b) => {
-                register[r as usize] = register[a as usize].sub(b.eval(&register));
-                pc += 1;
-            }
-            Op::Mul(r, a, b) => {
-                register[r as usize] = register[a as usize].mul(b.eval(&register));
-                pc += 1;
-            }
-            Op::Div(r, a, b) => {
-                let (quot, rem) = a.eval(&register).div(b.eval(&register));
-                register[r as usize] = quot;
-                pc += 1;
-            }
+            Op::Nop => {}
+            Op::Debug(context, r) => println!("{}{:?}", context, register[r as usize]),
+            Op::Const(r, value) => register[r as usize] = value,
+            Op::Copy(dst, src) => register[dst as usize] = register[src as usize],
+            Op::Inc(r) => register[r as usize] = register[r as usize].add(1),
+            Op::Dec(r) => register[r as usize] = register[r as usize].sub(1),
+            Op::Add(r, a, b) => register[r as usize] = register[a as usize].add(b.eval(&register)),
+            Op::Sub(r, a, b) => register[r as usize] = register[a as usize].sub(b.eval(&register)),
+            Op::Mul(r, a, b) => register[r as usize] = register[a as usize].mul(b.eval(&register)),
+            Op::Div(r, a, b) => register[r as usize] = a.eval(&register).div(b.eval(&register)),
             Op::Equal(r, a, b) => {
-                register[r as usize] = register[a as usize].ptr_equal(b.eval(&register));
-                pc += 1;
+                register[r as usize] = register[a as usize].ptr_equal(b.eval(&register))
             }
             Op::Uneq(r, a, b) => {
-                register[r as usize] = register[a as usize].ptr_equal(b.eval(&register)).not();
-                pc += 1;
+                register[r as usize] = register[a as usize].ptr_equal(b.eval(&register)).not()
             }
-            Op::Less(r, a, b) => {
-                register[r as usize] = a.eval(&register).less(b.eval(&register));
-                pc += 1;
-            }
+            Op::Less(r, a, b) => register[r as usize] = a.eval(&register).less(b.eval(&register)),
             Op::LessEq(r, a, b) => {
-                register[r as usize] = a.eval(&register).less_eq(b.eval(&register));
-                pc += 1;
+                register[r as usize] = a.eval(&register).less_eq(b.eval(&register))
             }
-            Op::Not(dst, src) => {
-                register[dst as usize] = register[src as usize].not();
-                pc += 1;
-            }
-            Op::Jmp(op) => match op {
-                Operand::R(r) => {
-                    code = register[r as usize].as_codeblock();
-                    pc = 0;
+            Op::Not(dst, src) => register[dst as usize] = register[src as usize].not(),
+            Op::Jmp(op) => {
+                match op {
+                    Operand::R(r) => {
+                        code = register[r as usize].as_codeblock();
+                        pc = 0;
+                    }
+                    Operand::I(relative) => pc = (pc as isize + relative as isize) as usize,
                 }
-                Operand::I(relative) => pc = (pc as isize + relative as isize) as usize,
-            },
+                continue;
+            }
             Op::JmpCond(op, c) => {
                 if register[c as usize].as_bool() {
                     match op {
@@ -159,71 +125,62 @@ pub fn run(mut code: &'static [Op], storage: &RecordStorage) -> PrimitiveValue {
                         }
                         Operand::I(relative) => pc = (pc as isize + relative) as usize,
                     }
-                } else {
-                    pc += 1;
+                    continue;
                 }
             }
             Op::JmpFar(target) => {
                 code = target;
                 pc = 0;
+                continue;
             }
             Op::LoadLabel(r, offset) => {
                 register[r as usize] =
-                    PrimitiveValue::CodeBlock(&code[(pc as isize + offset) as usize..]);
-                pc += 1;
+                    PrimitiveValue::CodeBlock(&code[(pc as isize + offset) as usize..])
             }
             Op::Alloc(r, size) => {
                 let rec = storage.allocate_record(size, &mut register);
                 register[r as usize] = PrimitiveValue::Record(rec);
-                pc += 1;
             }
             Op::GetRec(dst, r, i) => {
                 let rec = register[r as usize].as_record();
                 let idx = i.eval(&register);
                 register[dst as usize] = storage.get_record(rec)[idx];
-                pc += 1;
             }
             Op::SetRec(r, i, v) => {
                 let rec = register[r as usize].as_record();
                 let idx = i.eval(&register);
                 let value = v.eval(&register);
                 storage.set_element(rec, idx, value);
-                pc += 1;
             }
             Op::Cons(dst, car, cdr) => {
                 let rec = storage.allocate_record(2, &mut register);
                 storage.set_element(rec, 0, car.eval(&register));
                 storage.set_element(rec, 1, cdr.eval(&register));
                 register[dst as usize] = PrimitiveValue::Pair(rec.into());
-                pc += 1;
             }
             Op::Car(dst, r) => {
                 let rec = register[r as usize].as_record();
                 register[dst as usize] = storage.get_record(rec)[0];
-                pc += 1;
             }
             Op::Cdr(dst, r) => {
                 let rec = register[r as usize].as_record();
                 register[dst as usize] = storage.get_record(rec)[1];
-                pc += 1;
             }
             Op::Cell(dst, val) => {
                 let rec = storage.allocate_record(1, &mut register);
                 storage.set_element(rec, 0, val.eval(&register));
                 register[dst as usize] = PrimitiveValue::Cell(rec.into());
-                pc += 1;
             }
             Op::GetCell(dst, r) => {
                 let rec = register[r as usize].as_record();
                 register[dst as usize] = storage.get_record(rec)[0];
-                pc += 1;
             }
             Op::SetCell(r, val) => {
                 let rec = register[r as usize].as_record();
                 storage.set_element(rec, 0, val.eval(&register));
-                pc += 1;
             }
         }
+        pc += 1;
     }
 }
 

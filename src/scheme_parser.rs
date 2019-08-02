@@ -1,9 +1,7 @@
 use pest::error::{InputLocation, LineColLocation};
 use pest::{iterators::Pair, Parser, RuleType, Span};
 use pest_derive::*;
-use std::borrow::Borrow;
-use std::cell::{Ref, RefCell};
-use std::marker::PhantomData;
+use std::cell::RefCell;
 
 pub type Result<T, R> = std::result::Result<T, Error<R>>;
 
@@ -31,7 +29,7 @@ impl<R> From<pest::error::Error<R>> for Error<R> {
 }
 
 impl<R> From<(ErrorKind<R>, Pair<'_, R>)> for Error<R> {
-    fn from((kind, pair): (ErrorKind<R>, Pair<R>)) -> Self {
+    fn from((_kind, _pair): (ErrorKind<R>, Pair<R>)) -> Self {
         unimplemented!()
     }
 }
