@@ -64,6 +64,31 @@ impl From<Pair> for Record {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub struct Cell {
+    pub start_idx: usize,
+}
+
+impl From<Record> for Cell {
+    fn from(r: Record) -> Self {
+        if r.len != 1 {
+            panic!("Length {} record is not a cell", r.len)
+        }
+        Cell {
+            start_idx: r.start_idx,
+        }
+    }
+}
+
+impl From<Cell> for Record {
+    fn from(p: Cell) -> Self {
+        Record {
+            start_idx: p.start_idx,
+            len: 1,
+        }
+    }
+}
+
 pub struct RecordStorage<'a> {
     entries: Vec<PrimitiveValue>,
     _p: PhantomData<&'a ()>,

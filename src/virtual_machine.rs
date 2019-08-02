@@ -54,6 +54,10 @@ pub enum Op {
     Cons(Register, Operand<PrimitiveValue>, Operand<PrimitiveValue>),
     Car(Register, Register),
     Cdr(Register, Register),
+
+    Cell(Register, Operand<PrimitiveValue>),
+    GetCell(Register, Register),
+    SetCell(Register, Operand<PrimitiveValue>),
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -214,6 +218,22 @@ pub fn run(mut code: &'static [Op], storage: &RecordStorage) -> PrimitiveValue {
             Op::Cdr(dst, r) => {
                 let rec = register[r as usize].as_record();
                 register[dst as usize] = storage.get_record(rec)[1];
+                pc += 1;
+            }
+            Op::Cell(dst, val) => {
+                let rec = storage.allocate_record(1, &mut register);
+                storage.set_element(rec, 0, val.eval(&register));
+                register[dst as usize] = PrimitiveValue::Cell(rec.into());
+                pc += 1;
+            }
+            Op::GetCell(dst, r) => {
+                let rec = register[r as usize].as_record();
+                register[dst as usize] = storage.get_record(rec)[0];
+                pc += 1;
+            }
+            Op::SetCell(r, val) => {
+                let rec = register[r as usize].as_record();
+                storage.set_element(rec, 0, val.eval(&register));
                 pc += 1;
             }
         }

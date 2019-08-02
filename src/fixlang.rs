@@ -29,7 +29,8 @@ enum Cexp {
     Atomic(Aexp),
     PrimitiveAdd(Aexp, Aexp),
     PrimitiveMul(Aexp, Aexp),
-    Apply(String, Vec<Aexp>),
+    ApplyStatic(String, Vec<Aexp>),
+    Apply(Aexp, Vec<Aexp>),
 }
 
 enum Aexp {
@@ -56,8 +57,13 @@ impl From<Cexp> for Expr {
     }
 }
 
+enum VarSlot {
+    Immutable(Var),
+    Mutable(Var),
+}
+
 struct FixCompiler {
-    scope: Vec<(String, Var)>,
+    scope: Vec<(String, VarSlot)>,
     funcs: HashMap<String, Block>,
 }
 
@@ -78,7 +84,8 @@ impl FixCompiler {
             let tu = TranslationUnit::new();
             let code = tu.new_block();
             for p in &fdef.params {
-                self.scope.push((p.clone(), code.append_parameter()));
+                self.scope
+                    .push((p.clone(), VarSlot::Immutable(code.append_parameter())));
             }
             let entry = tu.new_function(&code);
             self.funcs.insert(fdef.name.clone(), entry.clone());
@@ -128,7 +135,7 @@ impl FixCompiler {
             Expr::Complex(cexp) => self.compile_cexp(cexp, block, true),
             Expr::Let(varname, def, body) => {
                 let v = self.compile_cexp(def, block, false).unwrap();
-                self.scope.push((varname.clone(), v));
+                self.scope.push((varname.clone(), VarSlot::Immutable(v)));
                 let r = self.compile_expr(body, block);
                 self.scope.pop();
                 r
@@ -145,7 +152,7 @@ impl FixCompiler {
             Cexp::PrimitiveMul(a, b) => {
                 block.mul(&self.compile_aexp(a, block), &self.compile_aexp(b, block))
             }
-            Cexp::Apply(func, args) => {
+            Cexp::ApplyStatic(func, args) => {
                 let args: Vec<_> = args.iter().map(|a| self.compile_aexp(a, block)).collect();
                 let ref_args: Vec<_> = args.iter().collect();
                 let func = &self.funcs[func];
@@ -156,6 +163,17 @@ impl FixCompiler {
                     block.call_static(func, &ref_args)
                 }
             }
+            Cexp::Apply(func, args) => {
+                let args: Vec<_> = args.iter().map(|a| self.compile_aexp(a, block)).collect();
+                let ref_args: Vec<_> = args.iter().collect();
+                let func = self.compile_aexp(func, block);
+                if tail_pos {
+                    block.tail_call(&func, &ref_args);
+                    return None;
+                } else {
+                    block.call(&func, &ref_args)
+                }
+            }
         })
     }
 
@@ -163,16 +181,19 @@ impl FixCompiler {
         match aexp {
             Aexp::Undefined => block.constant(PrimitiveValue::Undefined),
             Aexp::Integer(i) => block.constant(*i),
-            Aexp::Var(var_name) => self.lookup(var_name).unwrap(),
+            Aexp::Var(var_name) => self.lookup(var_name, block).unwrap(),
         }
     }
 
-    fn lookup(&self, var_name: &str) -> Option<Var> {
+    fn lookup(&self, var_name: &str, block: &Block) -> Option<Var> {
         self.scope
             .iter()
             .rev()
             .find(|(name, _)| name == var_name)
-            .map(|(_, var)| var.clone())
+            .map(|(_, slot)| match slot {
+                VarSlot::Immutable(var) => var.clone(),
+                VarSlot::Mutable(cell) => block.get_cell(cell),
+            })
     }
 }
 
@@ -197,8 +218,8 @@ mod tests {
             //body: Cexp::Apply("sqr".to_string(), vec![Aexp::Integer(42)]).into(),
             body: letvar(
                 "s",
-                Cexp::Apply("sqr".to_string(), vec![Aexp::Integer(3)]),
-                Cexp::Apply("sqr".to_string(), vec![Aexp::Var("s".to_string())]).into(),
+                Cexp::ApplyStatic("sqr".to_string(), vec![Aexp::Integer(3)]),
+                Cexp::ApplyStatic("sqr".to_string(), vec![Aexp::Var("s".to_string())]).into(),
             ),
         };
 

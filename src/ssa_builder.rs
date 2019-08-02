@@ -212,6 +212,14 @@ impl<V: std::fmt::Debug> Block<V> {
         var
     }
 
+    pub fn get_cell(&self, cell: &Var<V>) -> Var<V> {
+        let var = self.new_var();
+        self.block
+            .borrow_mut()
+            .append_op(Op::GetCell(var.name, cell.name));
+        var
+    }
+
     pub fn equals(&self, a: &Var<V>, b: &Var<V>) -> Var<V> {
         let result = self.new_var();
         self.block
@@ -624,6 +632,8 @@ enum Op<V> {
     Add(VarName, VarName, VarName),
     Mul(VarName, VarName, VarName),
 
+    GetCell(VarName, VarName),
+
     Equal(VarName, VarName, VarName),
 
     Copy(VarName, VarName),
@@ -673,7 +683,7 @@ impl<V: std::fmt::Debug> Op<V> {
                     *c = new
                 }
             }
-            Op::Copy(a, b) => {
+            Op::Copy(a, b) | Op::GetCell(a, b) => {
                 if a == &old {
                     *a = new
                 }
@@ -734,7 +744,7 @@ impl<V: std::fmt::Debug> Op<V> {
                 assert!(assigned_vars.contains(b));
                 assigned_vars.insert(*z);
             }
-            Op::Copy(z, a) => {
+            Op::Copy(z, a) | Op::GetCell(z, a) => {
                 assert!(assigned_vars.contains(a));
                 assigned_vars.insert(*z);
             }
@@ -869,6 +879,10 @@ impl LivenessGraph {
                 //       (the allocator heuristically minimizes the number of registers used,
                 //       which might actually have the same effect.)
                 self.preference_pairs.push((*a, *z));
+            }
+            Op::GetCell(z, a) => {
+                self.liveset.remove(z);
+                self.liveset.insert(*a);
             }
             Op::Return(a) => {
                 self.liveset.insert(*a);
@@ -1085,15 +1099,20 @@ impl Compiler {
     fn compile_op(&mut self, op: &Op<PrimitiveValue>) {
         use vm::Operand::*;
 
-        let r = |var| *self.register_assignment.get(var).unwrap() as vm::Register;
+        macro_rules! r {
+            ($var:expr) => {
+                *self.register_assignment.get($var).unwrap() as vm::Register
+            };
+        }
 
         match op {
-            Op::Const(z, c) => self.code.push(vm::Op::Const(r(z), *c)),
-            Op::Copy(z, a) if r(z) == r(a) => {}
-            Op::Copy(z, a) => self.code.push(vm::Op::Copy(r(z), r(a))),
-            Op::Add(z, a, b) => self.code.push(vm::Op::Add(r(z), r(a), R(r(b)))),
-            Op::Mul(z, a, b) => self.code.push(vm::Op::Mul(r(z), r(a), R(r(b)))),
-            Op::Equal(z, a, b) => self.code.push(vm::Op::Equal(r(z), r(a), R(r(b)))),
+            Op::Const(z, c) => self.code.push(vm::Op::Const(r!(z), *c)),
+            Op::Copy(z, a) if r!(z) == r!(a) => {}
+            Op::Copy(z, a) => self.code.push(vm::Op::Copy(r!(z), r!(a))),
+            Op::Add(z, a, b) => self.code.push(vm::Op::Add(r!(z), r!(a), R(r!(b)))),
+            Op::Mul(z, a, b) => self.code.push(vm::Op::Mul(r!(z), r!(a), R(r!(b)))),
+            Op::GetCell(z, a) => self.code.push(vm::Op::GetCell(r!(z), r!(a))),
+            Op::Equal(z, a, b) => self.code.push(vm::Op::Equal(r!(z), r!(a), R(r!(b)))),
             Op::Branch(blk, args) => {
                 for (a, p) in args.iter().zip(&blk.block.borrow().params) {
                     self.compile_op(&Op::Copy(*p, *a));
@@ -1106,7 +1125,7 @@ impl Compiler {
                 }
             }
             Op::Return(a) => {
-                assert_eq!(r(a), RETURN_VALUE_REGISTER as vm::Register);
+                assert_eq!(r!(a), RETURN_VALUE_REGISTER as vm::Register);
                 self.code
                     .push(vm::Op::Jmp(R(RETURN_TARGET_REGISTER as vm::Register)));
             }
@@ -1120,7 +1139,7 @@ impl Compiler {
                 vm::Op::Inc(STACK_POINTER_REGISTER as vm::Register),
                 // load return address and call function
                 vm::Op::LoadLabel(RETURN_TARGET_REGISTER as vm::Register, 2),
-                vm::Op::Jmp(R(r(f))),
+                vm::Op::Jmp(R(r!(f))),
                 // pop RETURN_VALUE_REGISTER
                 vm::Op::Dec(STACK_POINTER_REGISTER as vm::Register),
                 vm::Op::GetRec(
@@ -1151,7 +1170,7 @@ impl Compiler {
                     ),
                 ]);
             }
-            Op::TailCallDynamic(f, args) => self.code.push(vm::Op::Jmp(R(r(f)))),
+            Op::TailCallDynamic(f, args) => self.code.push(vm::Op::Jmp(R(r!(f)))),
             Op::TailCall(f, args) => {
                 self.placeholders.insert(self.code.len(), f.clone());
                 self.code.push(vm::Op::Term);

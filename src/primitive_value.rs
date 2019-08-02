@@ -1,4 +1,4 @@
-use crate::memory::{Pair, Record};
+use crate::memory::{Cell, Pair, Record};
 use crate::virtual_machine::Op;
 
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -10,6 +10,7 @@ pub enum PrimitiveValue {
     Integer(i64),
     Record(Record),
     Pair(Pair),
+    Cell(Cell),
 
     CodeBlock(&'static [Op]),
 
