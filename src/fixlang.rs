@@ -1,10 +1,10 @@
+use crate::fixlang::Cexp::PrimitiveMul;
 use crate::memory::store_code_block;
 use crate::primitive_value::PrimitiveValue;
 use crate::ssa_builder;
 use crate::ssa_builder::TranslationUnit;
 use crate::virtual_machine as vm;
 use std::collections::HashMap;
-use crate::fixlang::Cexp::PrimitiveMul;
 
 type Block = ssa_builder::Block<PrimitiveValue>;
 type Var = ssa_builder::Var<PrimitiveValue>;
@@ -192,12 +192,7 @@ impl FixCompiler {
             Aexp::Undefined => block.constant(PrimitiveValue::Undefined),
             Aexp::Integer(i) => block.constant(*i),
             Aexp::Var(var_name) => self.lookup(var_name, block).unwrap(),
-            Aexp::Function(func_name) => {
-                // TODO: 1. insert placeholder
-                //       2. resolve placeholders to actual code locations at end of compilation
-                //block.constant(PrimitiveValue::CodeBlock(self.funcs.get(func_name)))
-                block.constant(PrimitiveValue::Undefined)
-            }
+            Aexp::Function(func_name) => block.label(self.funcs.get(func_name).unwrap())
         }
     }
 
@@ -216,7 +211,10 @@ impl FixCompiler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ssa_builder::TranslationUnit;
+    use crate::ssa_builder::{
+        TranslationUnit, FIRST_ARG_REGISTER, RETURN_TARGET_REGISTER, RETURN_VALUE_REGISTER,
+    };
+    use crate::virtual_machine::Operand::*;
 
     fn letvar(v: &str, cexp: Cexp, body: Expr) -> Expr {
         Expr::Let(v.to_string(), cexp, Box::new(body))
@@ -263,7 +261,6 @@ mod tests {
                 body: Cexp::PrimitiveMul(Aexp::Var("x".to_string()), Aexp::Var("x".to_string()))
                     .into(),
             }],
-            //body: Cexp::Apply("sqr".to_string(), vec![Aexp::Integer(42)]).into(),
             body: letvar(
                 "s",
                 Aexp::Function("sqr".to_string()).into(),
@@ -283,6 +280,16 @@ mod tests {
             vm::Op::Term,
         ]);
 
-        assert_eq!(vm::eval(main), 81.into());
+        println!("{:?}", code);
+
+        let expected = store_code_block(vec![
+            vm::Op::Mul(
+                RETURN_VALUE_REGISTER,
+                FIRST_ARG_REGISTER,
+                R(FIRST_ARG_REGISTER),
+            ),
+            vm::Op::Jmp(R(RETURN_TARGET_REGISTER)),
+        ]);
+        assert_eq!(vm::eval(main), PrimitiveValue::CodeBlock(expected));
     }
 }

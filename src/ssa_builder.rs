@@ -297,6 +297,14 @@ impl<V: std::fmt::Debug> Block<V> {
         ret
     }
 
+    pub fn label(&self, func: &Block<V>) -> Var<V> {
+        let ret = self.new_var();
+        self.block
+            .borrow_mut()
+            .append_op(Op::Label(ret.name, func.clone()));
+        ret
+    }
+
     fn new_var(&self) -> Var<V> {
         let name = self.unit.upgrade().new_var_name();
         Var::new(self.unit.clone(), self, name)
@@ -644,6 +652,7 @@ enum Op<V> {
     Return(VarName),
     Call(VarName, Block<V>, Vec<VarName>),
     TailCall(Block<V>, Vec<VarName>),
+    Label(VarName, Block<V>),
 
     CallDynamic(VarName, VarName, Vec<VarName>),
     TailCallDynamic(VarName, Vec<VarName>),
@@ -667,7 +676,7 @@ impl<V: std::fmt::Debug> Op<V> {
 
     fn replace_var(&mut self, old: VarName, new: VarName) {
         match self {
-            Op::Const(v, _) | Op::Return(v) => {
+            Op::Const(v, _) | Op::Return(v) | Op::Label(v, _) => {
                 if v == &old {
                     *v = new
                 }
@@ -736,7 +745,7 @@ impl<V: std::fmt::Debug> Op<V> {
 
     fn verify(&self, assigned_vars: &mut HashSet<VarName>) {
         match self {
-            Op::Const(v, _) => {
+            Op::Const(v, _) | Op::Label(v, _) => {
                 assigned_vars.insert(*v);
             }
             Op::Add(z, a, b) | Op::Mul(z, a, b) | Op::Equal(z, a, b) => {
@@ -863,7 +872,7 @@ impl LivenessGraph {
 
     fn update<V: std::fmt::Debug>(&mut self, op: &Op<V>) {
         match op {
-            Op::Const(z, _) => {
+            Op::Const(z, _) | Op::Label(z, _) => {
                 self.liveset.remove(z);
             }
             Op::Add(z, a, b) | Op::Mul(z, a, b) | Op::Equal(z, a, b) => {
@@ -1056,9 +1065,14 @@ impl TranslationUnit<PrimitiveValue> {
     }
 }
 
+enum Placeholder {
+    Jump(Block<PrimitiveValue>),
+    Const(Block<PrimitiveValue>),
+}
+
 pub struct Compiler {
     code: Vec<vm::Op>,
-    placeholders: HashMap<usize, Block<PrimitiveValue>>,
+    placeholders: HashMap<usize, Placeholder>,
     labels: HashMap<BlockId, isize>,
     register_assignment: HashMap<VarName, vm::Register>,
 }
@@ -1149,7 +1163,8 @@ impl Compiler {
                 ),
             ]),
             Op::Call(z, f, args) => {
-                self.placeholders.insert(self.code.len() + 3, f.clone());
+                self.placeholders
+                    .insert(self.code.len() + 3, Placeholder::Jump(f.clone()));
                 self.code.extend_from_slice(&[
                     // push RETURN_TARGET_REGISTER
                     vm::Op::SetRec(
@@ -1172,8 +1187,15 @@ impl Compiler {
             }
             Op::TailCallDynamic(f, args) => self.code.push(vm::Op::Jmp(R(r!(f)))),
             Op::TailCall(f, args) => {
-                self.placeholders.insert(self.code.len(), f.clone());
+                self.placeholders
+                    .insert(self.code.len(), Placeholder::Jump(f.clone()));
                 self.code.push(vm::Op::Term);
+            }
+            Op::Label(z, f) => {
+                self.placeholders
+                    .insert(self.code.len(), Placeholder::Const(f.clone()));
+                self.code
+                    .push(vm::Op::Const(r!(z), PrimitiveValue::Undefined));
             }
             _ => unimplemented!("{:?}", op),
         }
@@ -1201,9 +1223,21 @@ pub fn link(compilers: &[Compiler], labels: &[isize]) -> (Vec<vm::Op>, Vec<isize
         new_labels.push(label + offset as isize);
     }
 
-    for (idx, blk) in placeholders {
-        let label = *block_labels.get(&blk.id()).expect("Unresolved label");
-        code[idx] = vm::Op::Jmp(vm::Operand::I(label - idx as isize));
+    for (idx, plh) in placeholders {
+        match plh {
+            Placeholder::Jump(blk) => {
+                let label = *block_labels.get(&blk.id()).expect("Unresolved label");
+                code[idx] = vm::Op::Jmp(vm::Operand::I(label - idx as isize));
+            }
+            Placeholder::Const(blk) => {
+                let label = *block_labels.get(&blk.id()).expect("Unresolved label");
+                if let vm::Op::Const(reg, _) = code[idx] {
+                    code[idx] = vm::Op::LoadLabel(reg, label - idx as isize);
+                } else {
+                    unreachable!()
+                }
+            }
+        }
     }
 
     (code, new_labels)
