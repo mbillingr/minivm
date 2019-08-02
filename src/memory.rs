@@ -7,18 +7,11 @@ use std::mem::replace;
 //const INITIAL_RECORD_STORAGE_SIZE: usize = 16;
 
 thread_local! {
-    static CODE: RefCell<Vec<Vec<Op>>> = RefCell::new(vec![]);
-
     //static RECORDS: RecordStorage<'static> = RecordStorage::new(INITIAL_RECORD_STORAGE_SIZE);
 }
 
 pub fn store_code_block(code: Vec<Op>) -> &'static [Op] {
-    CODE.with(|c| {
-        let n = code.len();
-        c.borrow_mut().push(code);
-        let ptr = c.borrow().last().unwrap().as_ptr();
-        unsafe { std::slice::from_raw_parts(ptr, n) }
-    })
+    Box::leak(Box::new(code))
 }
 
 /*pub fn allocate_record(n_fields: usize) -> Record {
