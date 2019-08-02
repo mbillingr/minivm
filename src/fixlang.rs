@@ -4,6 +4,7 @@ use crate::ssa_builder;
 use crate::ssa_builder::TranslationUnit;
 use crate::virtual_machine as vm;
 use std::collections::HashMap;
+use crate::fixlang::Cexp::PrimitiveMul;
 
 type Block = ssa_builder::Block<PrimitiveValue>;
 type Var = ssa_builder::Var<PrimitiveValue>;
@@ -21,6 +22,7 @@ struct FunctionDefinition {
 
 enum Expr {
     Let(String, Cexp, Box<Expr>),
+    LetMut(String, Cexp, Box<Expr>),
     Atomic(Aexp),
     Complex(Cexp),
 }
@@ -37,6 +39,7 @@ enum Aexp {
     Undefined,
     Integer(i64),
     Var(String),
+    Function(String),
 }
 
 impl From<Aexp> for Cexp {
@@ -140,6 +143,13 @@ impl FixCompiler {
                 self.scope.pop();
                 r
             }
+            Expr::LetMut(varname, def, body) => {
+                let v = self.compile_cexp(def, block, false).unwrap();
+                self.scope.push((varname.clone(), VarSlot::Mutable(v)));
+                let r = self.compile_expr(body, block);
+                self.scope.pop();
+                r
+            }
         }
     }
 
@@ -182,6 +192,12 @@ impl FixCompiler {
             Aexp::Undefined => block.constant(PrimitiveValue::Undefined),
             Aexp::Integer(i) => block.constant(*i),
             Aexp::Var(var_name) => self.lookup(var_name, block).unwrap(),
+            Aexp::Function(func_name) => {
+                // TODO: 1. insert placeholder
+                //       2. resolve placeholders to actual code locations at end of compilation
+                //block.constant(PrimitiveValue::CodeBlock(self.funcs.get(func_name)))
+                block.constant(PrimitiveValue::Undefined)
+            }
         }
     }
 
@@ -235,9 +251,38 @@ mod tests {
             vm::Op::Term,
         ]);
 
-        println!("{:?}", code);
-        println!("{:?}", vm::eval(main));
+        assert_eq!(vm::eval(main), 81.into());
+    }
 
-        unimplemented!()
+    #[test]
+    fn escaping_function() {
+        let prog = Prog {
+            function_definitions: vec![FunctionDefinition {
+                name: "sqr".to_string(),
+                params: vec!["x".to_string()],
+                body: Cexp::PrimitiveMul(Aexp::Var("x".to_string()), Aexp::Var("x".to_string()))
+                    .into(),
+            }],
+            //body: Cexp::Apply("sqr".to_string(), vec![Aexp::Integer(42)]).into(),
+            body: letvar(
+                "s",
+                Aexp::Function("sqr".to_string()).into(),
+                Aexp::Var("s".to_string()).into(),
+            ),
+        };
+
+        let mut c = FixCompiler::new();
+        let code = c.compile_prog(&prog);
+
+        let main = store_code_block(vec![
+            vm::Op::Alloc(ssa_builder::STACK_REGISTER, 100),
+            vm::Op::Const(ssa_builder::STACK_POINTER_REGISTER, 0.into()),
+            vm::Op::LoadLabel(ssa_builder::RETURN_TARGET_REGISTER, 2),
+            vm::Op::JmpFar(code),
+            vm::Op::Copy(0, ssa_builder::RETURN_VALUE_REGISTER),
+            vm::Op::Term,
+        ]);
+
+        assert_eq!(vm::eval(main), 81.into());
     }
 }
