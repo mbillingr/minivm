@@ -1,3 +1,4 @@
+use crate::assembler::Assembler;
 use crate::primitive_value::PrimitiveValue;
 use crate::virtual_machine as vm;
 use std::cell::RefCell;
@@ -532,122 +533,6 @@ impl VarName {
     }
 }
 
-pub struct Function<V> {
-    data: Rc<RefCell<FunctionData<V>>>,
-}
-
-impl<V> Clone for Function<V> {
-    fn clone(&self) -> Self {
-        Function {
-            data: self.data.clone(),
-        }
-    }
-}
-
-impl<V> std::fmt::Debug for Function<V> {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "Function<{:p}>", self.data.as_ptr())
-    }
-}
-
-impl<V: std::fmt::Debug> Function<V> {
-    pub fn new(entry_block: Block<V>) -> Self {
-        Function {
-            data: Rc::new(RefCell::new(FunctionData {
-                entry_block,
-                compiled: CompilationStatus::Uncompiled,
-            })),
-        }
-    }
-
-    fn n_params(&self) -> usize {
-        self.data.borrow().n_params()
-    }
-}
-
-impl<V> std::cmp::PartialEq for Function<V> {
-    fn eq(&self, rhs: &Self) -> bool {
-        Rc::ptr_eq(&self.data, &rhs.data)
-    }
-}
-
-impl<V> Function<V> {
-    fn id(&self) -> FunctionId {
-        FunctionId(self.data.as_ptr() as usize)
-    }
-
-    fn entry_block(&self) -> Block<V> {
-        self.data.borrow().entry_block.clone()
-    }
-}
-
-impl Function<PrimitiveValue> {
-    fn compile(&self, compiler: &mut Compiler) {
-        //self.data.borrow_mut().compile(compiler)
-        unimplemented!()
-    }
-}
-
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-struct FunctionId(usize);
-
-#[derive(Debug)]
-struct FunctionData<V> {
-    entry_block: Block<V>,
-    compiled: CompilationStatus,
-}
-
-impl<V: std::fmt::Debug> FunctionData<V> {
-    fn n_params(&self) -> usize {
-        self.entry_block.n_params()
-    }
-}
-
-impl FunctionData<PrimitiveValue> {
-    /*fn compile(&mut self, compiler: &mut Compiler) {
-        match self.compiled {
-            CompilationStatus::Uncompiled => {}
-            _ => panic!("Cant't compile function again"),
-        }
-        let unit = self.entry_block.unit.upgrade();
-        unit.verify(&self.entry_block);
-
-        // pre-assign registers to parameters
-        let mut insertion_offset = 0;
-        for (param, reg) in self
-            .entry_block
-            .params()
-            .into_iter()
-            .zip(FIRST_ARG_REGISTER..)
-        {
-            if let Some(r) = unit.get_allocation(&param) {
-                if r != reg {
-                    panic!("register assignment conflict");
-                }
-            }
-            let tmp_var1 = self.entry_block.new_var();
-            let tmp_var2 = self.entry_block.new_var();
-            unit.set_allocation(&tmp_var1, reg);
-            self.entry_block
-                .block
-                .borrow_mut()
-                .ops
-                .insert(insertion_offset, Op::Copy(param.name, tmp_var2.name));
-            self.entry_block
-                .block
-                .borrow_mut()
-                .ops
-                .insert(insertion_offset, Op::Copy(tmp_var2.name, tmp_var1.name));
-            insertion_offset += 1;
-        }
-
-        unit.allocate_registers(&self.entry_block);
-
-        let label = compiler.compile_block(&self.entry_block, &unit.unit.borrow().register_assignment);
-        self.compiled = CompilationStatus::Compiled(label);
-    }*/
-}
-
 #[derive(Debug, PartialEq)]
 enum CompilationStatus {
     Uncompiled,
@@ -1080,11 +965,11 @@ fn find_smallest_color(
 }
 
 impl TranslationUnit<PrimitiveValue> {
-    pub fn compile_function(&mut self, entry_block: &Block<PrimitiveValue>) -> (Compiler, isize) {
+    pub fn compile_function(&mut self, entry_block: &Block<PrimitiveValue>) -> Compiler {
         self.allocate_registers(entry_block);
         let mut compiler = Compiler::new(self.unit.borrow().register_assignment.clone());
-        let label = compiler.compile_block(&entry_block);
-        (compiler, label)
+        compiler.compile_block(&entry_block);
+        compiler
     }
 }
 
@@ -1094,39 +979,37 @@ enum Placeholder {
 }
 
 pub struct Compiler {
-    code: Vec<vm::Op>,
-    placeholders: HashMap<usize, Placeholder>,
-    labels: HashMap<BlockId, isize>,
+    assembly: Assembler,
+    compiled_blocks: HashSet<BlockId>,
     register_assignment: HashMap<VarName, vm::Register>,
+    counter: usize,
 }
 
 impl Compiler {
     pub fn new(register_assignment: HashMap<VarName, vm::Register>) -> Self {
         Compiler {
-            code: vec![],
-            placeholders: map![],
-            labels: map![],
+            assembly: Assembler::new(),
+            compiled_blocks: set![],
             register_assignment,
+            counter: 0,
         }
     }
 
-    fn current_pos(&self) -> isize {
-        self.code.len() as isize
+    pub fn compile_named(&mut self, name: String, block: &Block<PrimitiveValue>) {
+        assert!(!self.is_compiled(block));
+        self.assembly.label(name);
+        self.compile_block(block);
     }
 
-    pub fn compile_function(&mut self, func: &Function<PrimitiveValue>) {
-        let block = func.entry_block();
-        assert!(!self.labels.contains_key(&block.id()));
-        self.compile_block(&block);
-    }
+    fn compile_block(&mut self, block: &Block<PrimitiveValue>) -> String {
+        let label = self.block_label(block);
 
-    fn compile_block(&mut self, block: &Block<PrimitiveValue>) -> isize {
-        if let Some(label) = self.labels.get(&block.id()) {
-            return *label;
+        if self.is_compiled(&block) {
+            return label;
         }
 
-        let label = self.current_pos();
-        self.labels.insert(block.id(), label);
+        self.compiled_blocks.insert(block.id());
+        self.assembly.label(label.clone());
         for op in &block.block.borrow().ops {
             self.compile_op(op);
         }
@@ -1143,155 +1026,139 @@ impl Compiler {
         }
 
         match op {
-            Op::Const(z, c) => self.code.push(vm::Op::Const(r!(z), *c)),
+            Op::Const(z, c) => self.assembly.op(vm::Op::Const(r!(z), *c)),
             Op::Copy(z, a) if r!(z) == r!(a) => {}
-            Op::Copy(z, a) => self.code.push(vm::Op::Copy(r!(z), r!(a))),
-            Op::Add(z, a, b) => self.code.push(vm::Op::Add(r!(z), r!(a), R(r!(b)))),
-            Op::Sub(z, a, b) => self.code.push(vm::Op::Sub(r!(z), r!(a), R(r!(b)))),
-            Op::Mul(z, a, b) => self.code.push(vm::Op::Mul(r!(z), r!(a), R(r!(b)))),
-            Op::Div(z, a, b) => self.code.push(vm::Op::Div(r!(z), R(r!(a)), R(r!(b)))),
-            Op::GetCell(z, a) => self.code.push(vm::Op::GetCell(r!(z), r!(a))),
-            Op::Equal(z, a, b) => self.code.push(vm::Op::Equal(r!(z), r!(a), R(r!(b)))),
+            Op::Copy(z, a) => self.assembly.op(vm::Op::Copy(r!(z), r!(a))),
+            Op::Add(z, a, b) => self.assembly.op(vm::Op::Add(r!(z), r!(a), R(r!(b)))),
+            Op::Sub(z, a, b) => self.assembly.op(vm::Op::Sub(r!(z), r!(a), R(r!(b)))),
+            Op::Mul(z, a, b) => self.assembly.op(vm::Op::Mul(r!(z), r!(a), R(r!(b)))),
+            Op::Div(z, a, b) => self.assembly.op(vm::Op::Div(r!(z), R(r!(a)), R(r!(b)))),
+            Op::GetCell(z, a) => self.assembly.op(vm::Op::GetCell(r!(z), r!(a))),
+            Op::Equal(z, a, b) => self.assembly.op(vm::Op::Equal(r!(z), r!(a), R(r!(b)))),
             Op::Branch(blk, args) => {
                 for (a, p) in args.iter().zip(&blk.block.borrow().params) {
                     self.compile_op(&Op::Copy(*p, *a));
                 }
-                let pos = self.current_pos();
-                let label = self.compile_block(blk);
-                if label != pos {
-                    assert_eq!(pos, self.current_pos());
-                    self.code.push(vm::Op::Jmp(I(label - pos)))
+                if self.is_compiled(blk) {
+                    self.assembly.op(vm::Op::Jmp(I(self.block_label(&blk))))
+                } else {
+                    self.compile_block(blk);
                 }
             }
             Op::CondBranch(cond, yes, no) => {
-                let pos = self.current_pos();
-                self.code.push(vm::Op::Term);
-                let no_label = self.compile_block(no);
-                if no_label != pos + 1 {
-                    assert_eq!(pos + 1, self.current_pos());
-                    self.code.push(vm::Op::Jmp(I(no_label - pos - 1)))
+                let yes_label = self.block_label(yes);
+                let no_label = self.block_label(no);
+                let after_if = self.unique_label("__after_if");
+
+                self.assembly.op(vm::Op::JmpCond(I(yes_label), r!(cond)));
+
+                if self.is_compiled(no) {
+                    self.assembly.op(vm::Op::Jmp(I(self.block_label(no))))
+                } else {
+                    self.compile_block(no);
                 }
-                let no_pos = self.current_pos();
-                self.code.push(vm::Op::Term);
-                let yes_label = self.compile_block(yes);
-                self.code[pos as usize] = vm::Op::JmpCond(I(yes_label - pos), r!(cond));
-                self.code[no_pos as usize] = vm::Op::Jmp(I(self.current_pos() - no_pos));
+
+                if !self.is_compiled(yes) {
+                    self.compile_block(yes);
+                }
+
+                self.assembly.label(after_if);
             }
             Op::Return(a) => {
                 assert_eq!(r!(a), RETURN_VALUE_REGISTER as vm::Register);
-                self.code
-                    .push(vm::Op::Jmp(R(RETURN_TARGET_REGISTER as vm::Register)));
+                self.assembly
+                    .op(vm::Op::Jmp(R(RETURN_TARGET_REGISTER as vm::Register)));
             }
-            Op::CallDynamic(z, f, args) => {
+            Op::CallDynamic(_, f, args) => {
                 for (r, a) in (FIRST_ARG_REGISTER..).zip(args) {
                     if r!(a) != r {
-                        self.code.push(vm::Op::Copy(r, r!(a)));
+                        self.assembly.op(vm::Op::Copy(r, r!(a)));
                     }
                 }
-                self.code.extend_from_slice(&[
-                    // push RETURN_TARGET_REGISTER
-                    vm::Op::SetRec(
-                        STACK_REGISTER as vm::Register,
-                        R(STACK_POINTER_REGISTER as vm::Register),
-                        R(RETURN_TARGET_REGISTER as vm::Register),
-                    ),
-                    vm::Op::Inc(STACK_POINTER_REGISTER as vm::Register),
-                    // load return address and call function
-                    vm::Op::LoadLabel(RETURN_TARGET_REGISTER as vm::Register, 2),
-                    vm::Op::Jmp(R(r!(f))),
-                    // pop RETURN_VALUE_REGISTER
-                    vm::Op::Dec(STACK_POINTER_REGISTER as vm::Register),
-                    vm::Op::GetRec(
-                        RETURN_TARGET_REGISTER as vm::Register,
-                        STACK_REGISTER as vm::Register,
-                        R(STACK_POINTER_REGISTER as vm::Register),
-                    ),
-                ])
+                let after_call = self.unique_label("__after_call");
+                self.compile_push(RETURN_TARGET_REGISTER);
+                self.assembly.op(vm::Op::LoadLabel(
+                    RETURN_TARGET_REGISTER,
+                    after_call.clone(),
+                ));
+                self.assembly.op(vm::Op::Jmp(R(r!(f))));
+                self.assembly.label(after_call);
+                self.compile_pop(RETURN_TARGET_REGISTER);
             }
-            Op::Call(z, f, args) => {
+            Op::Call(_, f, args) => {
                 for (r, a) in (FIRST_ARG_REGISTER..).zip(args) {
                     if r!(a) != r {
-                        self.code.push(vm::Op::Copy(r, r!(a)));
+                        self.assembly.op(vm::Op::Copy(r, r!(a)));
                     }
                 }
-                self.placeholders
-                    .insert(self.code.len() + 3, Placeholder::Jump(f.clone()));
-                self.code.extend_from_slice(&[
-                    // push RETURN_TARGET_REGISTER
-                    vm::Op::SetRec(
-                        STACK_REGISTER as vm::Register,
-                        R(STACK_POINTER_REGISTER as vm::Register),
-                        R(RETURN_TARGET_REGISTER as vm::Register),
-                    ),
-                    vm::Op::Inc(STACK_POINTER_REGISTER as vm::Register),
-                    // load return address and call function
-                    vm::Op::LoadLabel(RETURN_TARGET_REGISTER as vm::Register, 2),
-                    vm::Op::Term,
-                    // pop RETURN_VALUE_REGISTER
-                    vm::Op::Dec(STACK_POINTER_REGISTER as vm::Register),
-                    vm::Op::GetRec(
-                        RETURN_TARGET_REGISTER as vm::Register,
-                        STACK_REGISTER as vm::Register,
-                        R(STACK_POINTER_REGISTER as vm::Register),
-                    ),
-                ]);
+                let func = self.block_label(f);
+                let after_call = self.unique_label("__after_call");
+                self.compile_push(RETURN_TARGET_REGISTER);
+                self.assembly.op(vm::Op::LoadLabel(
+                    RETURN_TARGET_REGISTER,
+                    after_call.clone(),
+                ));
+                self.assembly.op(vm::Op::Jmp(I(func)));
+                self.assembly.label(after_call);
+                self.compile_pop(RETURN_TARGET_REGISTER);
             }
-            Op::TailCallDynamic(f, args) => self.code.push(vm::Op::Jmp(R(r!(f)))),
+            Op::TailCallDynamic(f, args) => self.assembly.op(vm::Op::Jmp(R(r!(f)))),
             Op::TailCall(f, args) => {
-                self.placeholders
-                    .insert(self.code.len(), Placeholder::Jump(f.clone()));
-                self.code.push(vm::Op::Term);
+                let func = self.block_label(f);
+                self.assembly.op(vm::Op::Jmp(I(func)));
             }
             Op::Label(z, f) => {
-                self.placeholders
-                    .insert(self.code.len(), Placeholder::Const(f.clone()));
-                self.code
-                    .push(vm::Op::Const(r!(z), PrimitiveValue::Undefined));
+                let func = self.block_label(f);
+                self.assembly.op(vm::Op::LoadLabel(r!(z), func));
             }
             _ => unimplemented!("{:?}", op),
         }
     }
+
+    fn compile_push(&mut self, register: vm::Register) {
+        use vm::Operand::R;
+        self.assembly.op(vm::Op::SetRec(
+            STACK_REGISTER,
+            R(STACK_POINTER_REGISTER),
+            R(register),
+        ));
+        self.assembly.op(vm::Op::Inc(STACK_POINTER_REGISTER));
+    }
+
+    fn compile_pop(&mut self, register: vm::Register) {
+        use vm::Operand::R;
+        self.assembly.op(vm::Op::Dec(STACK_POINTER_REGISTER));
+        self.assembly.op(vm::Op::GetRec(
+            register,
+            STACK_REGISTER,
+            R(STACK_POINTER_REGISTER),
+        ));
+    }
+
+    fn block_label(&self, block: &Block<PrimitiveValue>) -> String {
+        format!("__blk-{:?}", block.id())
+    }
+
+    fn is_compiled(&self, block: &Block<PrimitiveValue>) -> bool {
+        self.compiled_blocks.contains(&block.id())
+    }
+
+    fn unique_label(&mut self, name: &str) -> String {
+        self.counter += 1;
+        format!("{}-{}", name, self.counter)
+    }
 }
 
-pub fn link(compilers: &[Compiler], labels: &[isize]) -> (Vec<vm::Op>, Vec<isize>) {
-    let mut code = vec![];
-    let mut placeholders = map![];
-    let mut new_labels = vec![];
-    let mut block_labels = map![];
-    for (comp, label) in compilers.iter().zip(labels) {
-        let offset = code.len();
-        code.extend(comp.code.clone());
-        placeholders.extend(
-            comp.placeholders
-                .iter()
-                .map(|(idx, blk)| (*idx + offset, blk)),
-        );
-        block_labels.extend(
-            comp.labels
-                .iter()
-                .map(|(blkid, l)| (blkid, l + offset as isize)),
-        );
-        new_labels.push(label + offset as isize);
+pub fn link(compilers: &[Compiler]) -> (Vec<vm::Op>, HashMap<String, usize>) {
+    let mut assembly = Assembler::new();
+
+    for comp in compilers {
+        assembly.append(&comp.assembly)
     }
 
-    for (idx, plh) in placeholders {
-        match plh {
-            Placeholder::Jump(blk) => {
-                let label = *block_labels.get(&blk.id()).expect("Unresolved label");
-                code[idx] = vm::Op::Jmp(vm::Operand::I(label - idx as isize));
-            }
-            Placeholder::Const(blk) => {
-                let label = *block_labels.get(&blk.id()).expect("Unresolved label");
-                if let vm::Op::Const(reg, _) = code[idx] {
-                    code[idx] = vm::Op::LoadLabel(reg, label - idx as isize);
-                } else {
-                    unreachable!()
-                }
-            }
-        }
-    }
+    let (code, labels) = assembly.assemble().unwrap();
 
-    (code, new_labels)
+    (code, labels)
 }
 
 #[cfg(test)]
@@ -1706,8 +1573,10 @@ mod tests {
         let mut compiler = Compiler::new(tu.unit.borrow().register_assignment.clone());
         compiler.compile_block(&entry);
 
+        let (code, _) = compiler.assembly.assemble().unwrap();
+
         assert_eq!(
-            compiler.code,
+            code,
             vec![
                 vm::Op::Add(
                     RETURN_VALUE_REGISTER,
@@ -1737,11 +1606,11 @@ mod tests {
 
         let mut compiler = Compiler::new(tu.unit.borrow().register_assignment.clone());
         compiler.compile_block(&exit);
-        let label = compiler.compile_block(&entry);
+        compiler.compile_block(&entry);
 
-        assert_eq!(label, 2);
+        let (code, _) = compiler.assembly.assemble().unwrap();
         assert_eq!(
-            compiler.code,
+            code,
             vec![
                 vm::Op::Add(
                     RETURN_VALUE_REGISTER,
@@ -1771,7 +1640,9 @@ mod tests {
         let mut compiler = Compiler::new(tu.unit.borrow().register_assignment.clone());
         compiler.compile_block(&func);
 
-        let code = store_code_block(compiler.code);
+        let (code, _) = compiler.assembly.assemble().unwrap();
+
+        let code = store_code_block(code);
         let main = store_code_block(vec![
             vm::Op::Const(
                 FIRST_ARG_REGISTER as vm::Register,
@@ -1808,8 +1679,10 @@ mod tests {
         let mut compiler = Compiler::new(tu.unit.borrow().register_assignment.clone());
         compiler.compile_block(&func);
 
+        let (code, _) = compiler.assembly.assemble().unwrap();
+
         assert_eq!(
-            compiler.code,
+            code,
             vec![
                 vm::Op::Copy(FIRST_GENERAL_PURPOSE_REGISTER, FIRST_ARG_REGISTER),
                 vm::Op::Copy(FIRST_ARG_REGISTER, FIRST_ARG_REGISTER + 1),
@@ -1849,13 +1722,13 @@ mod tests {
 
         tu2.allocate_registers(&func2);
         let mut compiler2 = Compiler::new(tu2.unit.borrow().register_assignment.clone());
-        let l2 = compiler2.compile_block(&func2);
+        let l2 = compiler2.compile_named("f2".to_string(), &func2);
 
         tu1.allocate_registers(&func1);
         let mut compiler1 = Compiler::new(tu1.unit.borrow().register_assignment.clone());
-        let l1 = compiler1.compile_block(&func1);
+        let l1 = compiler1.compile_named("f1".to_string(), &func1);
 
-        let (code, labels) = link(&[compiler1, compiler2], &[l1, l2]);
+        let (code, labels) = link(&[compiler1, compiler2]);
 
         assert_eq!(
             code,
@@ -1866,7 +1739,9 @@ mod tests {
                 vm::Op::Jmp(I(-3))
             ]
         );
-        assert_eq!(labels, vec![0, 2]);
+
+        assert_eq!(labels["f1"], 0);
+        assert_eq!(labels["f2"], 2);
     }
 
     /*#[test]

@@ -151,7 +151,6 @@ impl FixCompiler {
         }
 
         let mut compilers = vec![];
-        let mut labels = vec![];
 
         let mut body_tu = TranslationUnit::new();
         let body_block = body_tu.new_block();
@@ -159,9 +158,8 @@ impl FixCompiler {
         if let Some(result) = result {
             final_block.return_(&result);
         }
-        let (c, l) = body_tu.compile_function(&body_block);
+        let c = body_tu.compile_function(&body_block);
         compilers.push(c);
-        labels.push(l);
 
         for (((fdef, entry), code), mut tu) in prog
             .function_definitions
@@ -175,16 +173,13 @@ impl FixCompiler {
                 exit.return_(&ret);
             }
 
-            let (c, l) = tu.compile_function(&entry);
+            let c = tu.compile_function(&entry);
             compilers.push(c);
-            labels.push(l);
         }
 
-        let (code, offsets) = ssa_builder::link(&compilers, &labels);
+        let (code, offsets) = ssa_builder::link(&compilers);
 
-        let code = store_code_block(code);
-        assert_eq!(offsets[0], 0);
-        code
+        store_code_block(code)
     }
 
     fn compile_expr(&mut self, expr: &Expr, block: &Block) -> (Option<Var>, Block) {
