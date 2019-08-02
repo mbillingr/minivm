@@ -286,9 +286,7 @@ impl<V: std::fmt::Debug> Block<V> {
     }
 
     pub fn tail_call(&self, func: &Var<V>, args: &[&Var<V>]) {
-        let arg_names = args.iter()
-            .map(|a| self.copy(a).name)
-            .collect();
+        let arg_names = args.iter().map(|a| self.copy(a).name).collect();
         self.block
             .borrow_mut()
             .append_op(Op::TailCallDynamic(func.name, arg_names));
@@ -296,17 +294,15 @@ impl<V: std::fmt::Debug> Block<V> {
 
     pub fn call(&self, func: &Var<V>, args: &[&Var<V>]) -> Var<V> {
         let ret = self.new_var();
-        let arg_names = args.iter()
-            .map(|a| self.copy(a).name)
-            .collect();
-        self.block.borrow_mut().append_op(Op::CallDynamic(ret.name, func.name, arg_names));
+        let arg_names = args.iter().map(|a| self.copy(a).name).collect();
+        self.block
+            .borrow_mut()
+            .append_op(Op::CallDynamic(ret.name, func.name, arg_names));
         self.copy(&ret)
     }
 
     pub fn tail_call_static(&self, func: &Block<V>, args: &[&Var<V>]) {
-        let arg_names = args.iter()
-            .map(|a| self.copy(a).name)
-            .collect();
+        let arg_names = args.iter().map(|a| self.copy(a).name).collect();
         self.block
             .borrow_mut()
             .append_op(Op::TailCall(func.clone(), arg_names));
@@ -314,9 +310,7 @@ impl<V: std::fmt::Debug> Block<V> {
 
     pub fn call_static(&self, func: &Block<V>, args: &[&Var<V>]) -> Var<V> {
         let ret = self.new_var();
-        let arg_names = args.iter()
-            .map(|a| self.copy(a).name)
-            .collect();
+        let arg_names = args.iter().map(|a| self.copy(a).name).collect();
         self.block
             .borrow_mut()
             .append_op(Op::Call(ret.name, func.clone(), arg_names));
@@ -1195,24 +1189,25 @@ impl Compiler {
                     }
                 }
                 self.code.extend_from_slice(&[
-                // push RETURN_TARGET_REGISTER
-                vm::Op::SetRec(
-                    STACK_REGISTER as vm::Register,
-                    R(STACK_POINTER_REGISTER as vm::Register),
-                    R(RETURN_TARGET_REGISTER as vm::Register),
-                ),
-                vm::Op::Inc(STACK_POINTER_REGISTER as vm::Register),
-                // load return address and call function
-                vm::Op::LoadLabel(RETURN_TARGET_REGISTER as vm::Register, 2),
-                vm::Op::Jmp(R(r!(f))),
-                // pop RETURN_VALUE_REGISTER
-                vm::Op::Dec(STACK_POINTER_REGISTER as vm::Register),
-                vm::Op::GetRec(
-                    RETURN_TARGET_REGISTER as vm::Register,
-                    STACK_REGISTER as vm::Register,
-                    R(STACK_POINTER_REGISTER as vm::Register),
-                ),
-            ])},
+                    // push RETURN_TARGET_REGISTER
+                    vm::Op::SetRec(
+                        STACK_REGISTER as vm::Register,
+                        R(STACK_POINTER_REGISTER as vm::Register),
+                        R(RETURN_TARGET_REGISTER as vm::Register),
+                    ),
+                    vm::Op::Inc(STACK_POINTER_REGISTER as vm::Register),
+                    // load return address and call function
+                    vm::Op::LoadLabel(RETURN_TARGET_REGISTER as vm::Register, 2),
+                    vm::Op::Jmp(R(r!(f))),
+                    // pop RETURN_VALUE_REGISTER
+                    vm::Op::Dec(STACK_POINTER_REGISTER as vm::Register),
+                    vm::Op::GetRec(
+                        RETURN_TARGET_REGISTER as vm::Register,
+                        STACK_REGISTER as vm::Register,
+                        R(STACK_POINTER_REGISTER as vm::Register),
+                    ),
+                ])
+            }
             Op::Call(z, f, args) => {
                 for (r, a) in (FIRST_ARG_REGISTER..).zip(args) {
                     if r!(a) != r {

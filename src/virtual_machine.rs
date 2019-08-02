@@ -6,7 +6,7 @@ const N_REGISTERS: usize = 8;
 pub type Register = u8;
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum Op {
+pub enum Op<T = isize> {
     // Trivial Operations
     Term,
     Nop,
@@ -17,7 +17,6 @@ pub enum Op {
     // Register Manipulation
     Const(Register, PrimitiveValue),
     Copy(Register, Register),
-    Swap(Register, Register),
 
     // Arithmetic
     Inc(Register),
@@ -35,10 +34,10 @@ pub enum Op {
     Not(Register, Register),
 
     // Branching
-    Jmp(Operand<isize>),
+    Jmp(Operand<T>),
     JmpFar(&'static [Op]),
-    JmpCond(Operand<isize>, Register),
-    LoadLabel(Register, isize),
+    JmpCond(Operand<T>, Register),
+    LoadLabel(Register, T),
 
     // Records
     Alloc(Register, usize),
@@ -97,12 +96,6 @@ pub fn run(mut code: &'static [Op], storage: &RecordStorage) -> PrimitiveValue {
             }
             Op::Copy(dst, src) => {
                 register[dst as usize] = register[src as usize];
-                pc += 1;
-            }
-            Op::Swap(a, b) => {
-                let tmp = register[a as usize];
-                register[a as usize] = register[b as usize];
-                register[b as usize] = tmp;
                 pc += 1;
             }
             Op::Inc(r) => {
@@ -286,20 +279,6 @@ mod tests {
             ],
             vec![2, 2],
         )
-    }
-
-    #[test]
-    fn swap() {
-        run_vm_test(
-            vec![
-                Op::Const(0, PrimitiveValue::Integer(1)),
-                Op::Const(1, PrimitiveValue::Integer(2)),
-                Op::Swap(0, 1),
-                Op::Cons(0, R(0), R(1)),
-                Op::Term,
-            ],
-            vec![2, 1],
-        );
     }
 
     #[test]

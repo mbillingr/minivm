@@ -401,9 +401,13 @@ mod tests {
                         Aexp::Integer(3).into(),
                         Cexp::ApplyPrimitive(
                             PrimOp::Add,
-                            vec![Aexp::Var("a".to_string()), Aexp::Var("b".to_string()), Aexp::Var("c".to_string())],
+                            vec![
+                                Aexp::Var("a".to_string()),
+                                Aexp::Var("b".to_string()),
+                                Aexp::Var("c".to_string()),
+                            ],
                         )
-                            .into(),
+                        .into(),
                     ),
                 ),
             ),
@@ -442,7 +446,7 @@ mod tests {
                         Box::new(Aexp::Integer(1).into()),
                         Box::new(Aexp::Integer(2).into()),
                     )
-                        .into(),
+                    .into(),
                 ),
             }],
             body: letvar(
