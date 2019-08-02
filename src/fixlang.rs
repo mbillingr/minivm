@@ -1,4 +1,3 @@
-use crate::fixlang::Cexp::PrimitiveMul;
 use crate::memory::store_code_block;
 use crate::primitive_value::PrimitiveValue;
 use crate::ssa_builder;
@@ -29,10 +28,10 @@ enum Expr {
 
 enum Cexp {
     Atomic(Aexp),
-    PrimitiveAdd(Aexp, Aexp),
-    PrimitiveMul(Aexp, Aexp),
+    ApplyPrimitive(PrimOp, Vec<Aexp>),
     ApplyStatic(String, Vec<Aexp>),
     Apply(Aexp, Vec<Aexp>),
+    If(Aexp, Box<Expr>, Box<Expr>),
 }
 
 enum Aexp {
@@ -57,6 +56,60 @@ impl From<Aexp> for Expr {
 impl From<Cexp> for Expr {
     fn from(cexp: Cexp) -> Self {
         Expr::Complex(cexp)
+    }
+}
+
+enum PrimOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+
+    Equal,
+}
+
+impl PrimOp {
+    fn compile(&self, args: &[Var], block: &Block) -> Var {
+        match args.len() {
+            0 => self.invariant(block),
+            1 => self.singular(&args[0], block),
+            2 => self.binop(&args[0], &args[1], block),
+            _ => {
+                let mut aggregate = self.binop(&args[0], &args[1], block);
+                for a in &args[2..] {
+                    aggregate = self.binop(&aggregate, a, block);
+                }
+                aggregate
+            }
+        }
+    }
+
+    fn invariant(&self, block: &Block) -> Var {
+        match self {
+            PrimOp::Add | PrimOp::Sub => block.constant(0),
+            PrimOp::Mul | PrimOp::Div => block.constant(1),
+            _ => panic!("invalid number of arguments"),
+        }
+    }
+
+    fn singular(&self, x: &Var, block: &Block) -> Var {
+        match self {
+            PrimOp::Add => x.clone(),
+            PrimOp::Sub => self.binop(&self.invariant(block), x, block),
+            PrimOp::Mul => x.clone(),
+            PrimOp::Div => self.binop(&self.invariant(block), x, block),
+            _ => panic!("invalid number of arguments"),
+        }
+    }
+
+    fn binop(&self, x: &Var, y: &Var, block: &Block) -> Var {
+        match self {
+            PrimOp::Add => block.add(x, y),
+            PrimOp::Sub => block.sub(x, y),
+            PrimOp::Mul => block.mul(x, y),
+            PrimOp::Div => block.div(x, y),
+            PrimOp::Equal => block.equals(x, y),
+        }
     }
 }
 
@@ -102,8 +155,9 @@ impl FixCompiler {
 
         let mut body_tu = TranslationUnit::new();
         let body_block = body_tu.new_block();
-        if let Some(result) = self.compile_expr(&prog.body, &body_block) {
-            body_block.return_(&result);
+        let (result, final_block) = self.compile_expr(&prog.body, &body_block);
+        if let Some(result) = result {
+            final_block.return_(&result);
         }
         let (c, l) = body_tu.compile_function(&body_block);
         compilers.push(c);
@@ -116,8 +170,9 @@ impl FixCompiler {
             .zip(body_blocks)
             .zip(trans_units)
         {
-            if let Some(ret) = self.compile_expr(&fdef.body, &code) {
-                code.return_(&ret);
+            let (ret, exit) = self.compile_expr(&fdef.body, &code);
+            if let Some(ret) = ret {
+                exit.return_(&ret);
             }
 
             let (c, l) = tu.compile_function(&entry);
@@ -132,68 +187,100 @@ impl FixCompiler {
         code
     }
 
-    fn compile_expr(&mut self, expr: &Expr, block: &Block) -> Option<Var> {
+    fn compile_expr(&mut self, expr: &Expr, block: &Block) -> (Option<Var>, Block) {
         match expr {
-            Expr::Atomic(aexp) => Some(self.compile_aexp(aexp, block)),
+            Expr::Atomic(aexp) => self.compile_aexp(aexp, block),
             Expr::Complex(cexp) => self.compile_cexp(cexp, block, true),
             Expr::Let(varname, def, body) => {
-                let v = self.compile_cexp(def, block, false).unwrap();
-                self.scope.push((varname.clone(), VarSlot::Immutable(v)));
-                let r = self.compile_expr(body, block);
+                let (v, block) = self.compile_cexp(def, block, false);
+                self.scope
+                    .push((varname.clone(), VarSlot::Immutable(v.unwrap())));
+                let (r, block) = self.compile_expr(body, &block);
                 self.scope.pop();
-                r
+                (r, block)
             }
             Expr::LetMut(varname, def, body) => {
-                let v = self.compile_cexp(def, block, false).unwrap();
-                self.scope.push((varname.clone(), VarSlot::Mutable(v)));
-                let r = self.compile_expr(body, block);
+                let (v, block) = self.compile_cexp(def, block, false);
+                self.scope
+                    .push((varname.clone(), VarSlot::Mutable(v.unwrap())));
+                let (r, block) = self.compile_expr(body, &block);
                 self.scope.pop();
-                r
+                (r, block)
             }
         }
     }
 
-    fn compile_cexp(&mut self, cexp: &Cexp, block: &Block, tail_pos: bool) -> Option<Var> {
-        Some(match cexp {
+    fn compile_cexp(&mut self, cexp: &Cexp, block: &Block, tail_pos: bool) -> (Option<Var>, Block) {
+        match cexp {
             Cexp::Atomic(aexp) => self.compile_aexp(aexp, block),
-            Cexp::PrimitiveAdd(a, b) => {
-                block.add(&self.compile_aexp(a, block), &self.compile_aexp(b, block))
-            }
-            Cexp::PrimitiveMul(a, b) => {
-                block.mul(&self.compile_aexp(a, block), &self.compile_aexp(b, block))
+            Cexp::ApplyPrimitive(op, args) => {
+                let args: Vec<_> = args
+                    .iter()
+                    .map(|a| self.compile_aexp(a, block).0.unwrap())
+                    .collect();
+                (Some(op.compile(&args, block)), block.clone())
             }
             Cexp::ApplyStatic(func, args) => {
-                let args: Vec<_> = args.iter().map(|a| self.compile_aexp(a, block)).collect();
+                let args: Vec<_> = args
+                    .iter()
+                    .map(|a| self.compile_aexp(a, block).0.unwrap())
+                    .collect();
                 let ref_args: Vec<_> = args.iter().collect();
                 let func = &self.funcs[func];
                 if tail_pos {
                     block.tail_call_static(func, &ref_args);
-                    return None;
+                    (None, block.clone())
                 } else {
-                    block.call_static(func, &ref_args)
+                    (Some(block.call_static(func, &ref_args)), block.clone())
                 }
             }
             Cexp::Apply(func, args) => {
-                let args: Vec<_> = args.iter().map(|a| self.compile_aexp(a, block)).collect();
+                let args: Vec<_> = args
+                    .iter()
+                    .map(|a| self.compile_aexp(a, block).0.unwrap())
+                    .collect();
                 let ref_args: Vec<_> = args.iter().collect();
-                let func = self.compile_aexp(func, block);
+                let func = self.compile_aexp(func, block).0.unwrap();
                 if tail_pos {
                     block.tail_call(&func, &ref_args);
-                    return None;
+                    (None, block.clone())
                 } else {
-                    block.call(&func, &ref_args)
+                    (Some(block.call(&func, &ref_args)), block.clone())
                 }
             }
-        })
+            Cexp::If(cond, yes, no) => {
+                let yes_block = block.create_sibling();
+                let no_block = block.create_sibling();
+                let after_if = block.create_sibling();
+
+                let cond = self.compile_aexp(cond, block).0.unwrap();
+                block.branch_conditionally(&cond, &yes_block, &no_block);
+                let (yes_ret, yes_block) = self.compile_expr(yes, &yes_block);
+                let (no_ret, no_block) = self.compile_expr(no, &no_block);
+
+                if let Some(r) = yes_ret {
+                    yes_block.branch(&after_if, &[&r]);
+                }
+
+                if let Some(r) = no_ret {
+                    no_block.branch(&after_if, &[&r]);
+                }
+
+                (Some(after_if.append_parameter()), after_if)
+            }
+        }
     }
 
-    fn compile_aexp(&mut self, aexp: &Aexp, block: &Block) -> Var {
-        match aexp {
-            Aexp::Undefined => block.constant(PrimitiveValue::Undefined),
-            Aexp::Integer(i) => block.constant(*i),
-            Aexp::Var(var_name) => self.lookup(var_name, block).unwrap(),
-            Aexp::Function(func_name) => block.label(self.funcs.get(func_name).unwrap())
-        }
+    fn compile_aexp(&mut self, aexp: &Aexp, block: &Block) -> (Option<Var>, Block) {
+        (
+            Some(match aexp {
+                Aexp::Undefined => block.constant(PrimitiveValue::Undefined),
+                Aexp::Integer(i) => block.constant(*i),
+                Aexp::Var(var_name) => self.lookup(var_name, block).unwrap(),
+                Aexp::Function(func_name) => block.label(self.funcs.get(func_name).unwrap()),
+            }),
+            block.clone(),
+        )
     }
 
     fn lookup(&self, var_name: &str, block: &Block) -> Option<Var> {
@@ -226,8 +313,11 @@ mod tests {
             function_definitions: vec![FunctionDefinition {
                 name: "sqr".to_string(),
                 params: vec!["x".to_string()],
-                body: Cexp::PrimitiveMul(Aexp::Var("x".to_string()), Aexp::Var("x".to_string()))
-                    .into(),
+                body: Cexp::ApplyPrimitive(
+                    PrimOp::Mul,
+                    vec![Aexp::Var("x".to_string()), Aexp::Var("x".to_string())],
+                )
+                .into(),
             }],
             //body: Cexp::Apply("sqr".to_string(), vec![Aexp::Integer(42)]).into(),
             body: letvar(
@@ -258,8 +348,11 @@ mod tests {
             function_definitions: vec![FunctionDefinition {
                 name: "sqr".to_string(),
                 params: vec!["x".to_string()],
-                body: Cexp::PrimitiveMul(Aexp::Var("x".to_string()), Aexp::Var("x".to_string()))
-                    .into(),
+                body: Cexp::ApplyPrimitive(
+                    PrimOp::Mul,
+                    vec![Aexp::Var("x".to_string()), Aexp::Var("x".to_string())],
+                )
+                .into(),
             }],
             body: letvar(
                 "s",
@@ -291,5 +384,95 @@ mod tests {
             vm::Op::Jmp(R(RETURN_TARGET_REGISTER)),
         ]);
         assert_eq!(vm::eval(main), PrimitiveValue::CodeBlock(expected));
+    }
+
+    #[test]
+    fn nested_let() {
+        let prog = Prog {
+            function_definitions: vec![],
+            body: letvar(
+                "a",
+                Aexp::Integer(1).into(),
+                letvar(
+                    "b",
+                    Aexp::Integer(2).into(),
+                    letvar(
+                        "c",
+                        Aexp::Integer(3).into(),
+                        Cexp::ApplyPrimitive(
+                            PrimOp::Add,
+                            vec![Aexp::Var("a".to_string()), Aexp::Var("b".to_string()), Aexp::Var("c".to_string())],
+                        )
+                            .into(),
+                    ),
+                ),
+            ),
+        };
+
+        let mut c = FixCompiler::new();
+        let code = c.compile_prog(&prog);
+
+        let main = store_code_block(vec![
+            vm::Op::Alloc(ssa_builder::STACK_REGISTER, 100),
+            vm::Op::Const(ssa_builder::STACK_POINTER_REGISTER, 0.into()),
+            vm::Op::LoadLabel(ssa_builder::RETURN_TARGET_REGISTER, 2),
+            vm::Op::JmpFar(code),
+            vm::Op::Copy(0, ssa_builder::RETURN_VALUE_REGISTER),
+            vm::Op::Term,
+        ]);
+
+        println!("{:?}", code);
+        assert_eq!(vm::eval(main), PrimitiveValue::Integer(6));
+    }
+
+    #[test]
+    fn branching() {
+        let prog = Prog {
+            function_definitions: vec![FunctionDefinition {
+                name: "is_zero".to_string(),
+                params: vec!["x".to_string()],
+                body: letvar(
+                    "cond",
+                    Cexp::ApplyPrimitive(
+                        PrimOp::Equal,
+                        vec![Aexp::Var("x".to_string()), Aexp::Integer(0)],
+                    ),
+                    Cexp::If(
+                        Aexp::Var("cond".to_string()),
+                        Box::new(Aexp::Integer(1).into()),
+                        Box::new(Aexp::Integer(2).into()),
+                    )
+                        .into(),
+                ),
+            }],
+            body: letvar(
+                "a",
+                Cexp::ApplyStatic("is_zero".to_string(), vec![Aexp::Integer(0)]),
+                letvar(
+                    "b",
+                    Cexp::ApplyStatic("is_zero".to_string(), vec![Aexp::Integer(1)]),
+                    Cexp::ApplyPrimitive(
+                        PrimOp::Add,
+                        vec![Aexp::Var("a".to_string()), Aexp::Var("b".to_string())],
+                    )
+                    .into(),
+                ),
+            ),
+        };
+
+        let mut c = FixCompiler::new();
+        let code = c.compile_prog(&prog);
+
+        let main = store_code_block(vec![
+            vm::Op::Alloc(ssa_builder::STACK_REGISTER, 100),
+            vm::Op::Const(ssa_builder::STACK_POINTER_REGISTER, 0.into()),
+            vm::Op::LoadLabel(ssa_builder::RETURN_TARGET_REGISTER, 2),
+            vm::Op::JmpFar(code),
+            vm::Op::Copy(0, ssa_builder::RETURN_VALUE_REGISTER),
+            vm::Op::Term,
+        ]);
+
+        println!("{:?}", code);
+        assert_eq!(vm::eval(main), PrimitiveValue::Integer(3));
     }
 }

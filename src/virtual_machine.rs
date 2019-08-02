@@ -25,12 +25,7 @@ pub enum Op {
     Add(Register, Register, Operand<PrimitiveValue>),
     Sub(Register, Register, Operand<PrimitiveValue>),
     Mul(Register, Register, Operand<PrimitiveValue>),
-    Div(
-        Register,
-        Register,
-        Operand<PrimitiveValue>,
-        Operand<PrimitiveValue>,
-    ),
+    Div(Register, Operand<PrimitiveValue>, Operand<PrimitiveValue>),
 
     // Comparison
     Equal(Register, Register, Operand<PrimitiveValue>),
@@ -130,10 +125,9 @@ pub fn run(mut code: &'static [Op], storage: &RecordStorage) -> PrimitiveValue {
                 register[r as usize] = register[a as usize].mul(b.eval(&register));
                 pc += 1;
             }
-            Op::Div(r, s, a, b) => {
+            Op::Div(r, a, b) => {
                 let (quot, rem) = a.eval(&register).div(b.eval(&register));
                 register[r as usize] = quot;
-                register[s as usize] = rem;
                 pc += 1;
             }
             Op::Equal(r, a, b) => {
@@ -377,11 +371,10 @@ mod tests {
             vec![
                 Op::Const(1, PrimitiveValue::Integer(50)),
                 Op::Const(2, PrimitiveValue::Integer(20)),
-                Op::Div(0, 1, R(1), R(2)),
-                Op::Cons(0, R(0), R(1)),
+                Op::Div(0, R(1), R(2)),
                 Op::Term,
             ],
-            vec![2, 10],
+            2,
         )
     }
 
