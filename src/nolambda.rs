@@ -32,9 +32,9 @@ impl Prog {
 }
 
 pub struct FunctionDefinition {
-    name: String,
-    params: Vec<String>,
-    body: Expr,
+    pub name: String,
+    pub params: Vec<String>,
+    pub body: Expr,
 }
 
 pub enum Expr {
@@ -47,7 +47,7 @@ pub enum Expr {
 
 pub enum Cexp {
     Atomic(Aexp),
-    ApplyPrimitive(PrimOp, Vec<Aexp>),
+    //ApplyPrimitive(PrimOp, Vec<Aexp>),
     ApplyStatic(String, Vec<Aexp>),
     Apply(Aexp, Vec<Aexp>),
     If(Aexp, Box<Expr>, Box<Expr>),
@@ -58,6 +58,13 @@ pub enum Aexp {
     Integer(i64),
     Var(String),
     Function(String),
+    PrimOp(PrimOp),
+}
+
+impl From<PrimOp> for Aexp {
+    fn from(op: PrimOp) -> Self {
+        Aexp::PrimOp(op)
+    }
 }
 
 impl From<Aexp> for Cexp {
@@ -78,6 +85,7 @@ impl From<Cexp> for Expr {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
 pub enum PrimOp {
     Add,
     Sub,
@@ -85,21 +93,26 @@ pub enum PrimOp {
     Div,
 
     Equal,
+
+    MakeRec,
 }
 
 impl PrimOp {
     fn compile(&self, args: &[Var], block: &Block) -> Var {
-        match args.len() {
-            0 => self.invariant(block),
-            1 => self.singular(&args[0], block),
-            2 => self.binop(&args[0], &args[1], block),
-            _ => {
-                let mut aggregate = self.binop(&args[0], &args[1], block);
-                for a in &args[2..] {
-                    aggregate = self.binop(&aggregate, a, block);
+        match self {
+            MakeRec => self.make_rec(args, block),
+            _ => match args.len() {
+                0 => self.invariant(block),
+                1 => self.singular(&args[0], block),
+                2 => self.binop(&args[0], &args[1], block),
+                _ => {
+                    let mut aggregate = self.binop(&args[0], &args[1], block);
+                    for a in &args[2..] {
+                        aggregate = self.binop(&aggregate, a, block);
+                    }
+                    aggregate
                 }
-                aggregate
-            }
+            },
         }
     }
 
@@ -128,7 +141,15 @@ impl PrimOp {
             PrimOp::Mul => block.mul(x, y),
             PrimOp::Div => block.div(x, y),
             PrimOp::Equal => block.equals(x, y),
+            PrimOp::MakeRec => unreachable!(),
         }
+    }
+
+    fn make_rec(&self, vars: &[Var], block: &Block) -> Var {
+        // todo: emit instructions to
+        //  1. allocate record of size vars.len()
+        //  2. assign all elements in vars to record fields
+        unimplemented!()
     }
 }
 
@@ -240,13 +261,6 @@ impl FixCompiler {
     fn compile_cexp(&mut self, cexp: &Cexp, block: &Block, tail_pos: bool) -> (Option<Var>, Block) {
         match cexp {
             Cexp::Atomic(aexp) => self.compile_aexp(aexp, block),
-            Cexp::ApplyPrimitive(op, args) => {
-                let args: Vec<_> = args
-                    .iter()
-                    .map(|a| self.compile_aexp(a, block).0.unwrap())
-                    .collect();
-                (Some(op.compile(&args, block)), block.clone())
-            }
             Cexp::ApplyStatic(func, args) => {
                 let args: Vec<_> = args
                     .iter()
@@ -266,13 +280,23 @@ impl FixCompiler {
                     .iter()
                     .map(|a| self.compile_aexp(a, block).0.unwrap())
                     .collect();
-                let ref_args: Vec<_> = args.iter().collect();
-                let func = self.compile_aexp(func, block).0.unwrap();
-                if tail_pos {
-                    block.tail_call(&func, &ref_args);
-                    (None, block.clone())
+                if let Aexp::PrimOp(primitive) = func {
+                    if tail_pos {
+                        let ret = primitive.compile(&args, block);
+                        block.return_(&ret);
+                        (None, block.clone())
+                    } else {
+                        (Some(primitive.compile(&args, block)), block.clone())
+                    }
                 } else {
-                    (Some(block.call(&func, &ref_args)), block.clone())
+                    let ref_args: Vec<_> = args.iter().collect();
+                    let func = self.compile_aexp(func, block).0.unwrap();
+                    if tail_pos {
+                        block.tail_call(&func, &ref_args);
+                        (None, block.clone())
+                    } else {
+                        (Some(block.call(&func, &ref_args)), block.clone())
+                    }
                 }
             }
             Cexp::If(cond, yes, no) => {
@@ -305,6 +329,7 @@ impl FixCompiler {
                 Aexp::Integer(i) => block.constant(*i),
                 Aexp::Var(var_name) => self.lookup(var_name, block).unwrap(),
                 Aexp::Function(func_name) => block.label(self.funcs.get(func_name).unwrap()),
+                Aexp::PrimOp(prim) => unimplemented!("TODO: Implement wrapper functions for primitive operations so they can be bound to variables")
             }),
             block.clone(),
         )
@@ -338,8 +363,8 @@ mod tests {
             function_definitions: vec![FunctionDefinition {
                 name: "sqr".to_string(),
                 params: vec!["x".to_string()],
-                body: Cexp::ApplyPrimitive(
-                    PrimOp::Mul,
+                body: Cexp::Apply(
+                    PrimOp::Mul.into(),
                     vec![Aexp::Var("x".to_string()), Aexp::Var("x".to_string())],
                 )
                 .into(),
@@ -373,8 +398,8 @@ mod tests {
             function_definitions: vec![FunctionDefinition {
                 name: "sqr".to_string(),
                 params: vec!["x".to_string()],
-                body: Cexp::ApplyPrimitive(
-                    PrimOp::Mul,
+                body: Cexp::Apply(
+                    PrimOp::Mul.into(),
                     vec![Aexp::Var("x".to_string()), Aexp::Var("x".to_string())],
                 )
                 .into(),
@@ -424,8 +449,8 @@ mod tests {
                     letvar(
                         "c",
                         Aexp::Integer(3).into(),
-                        Cexp::ApplyPrimitive(
-                            PrimOp::Add,
+                        Cexp::Apply(
+                            PrimOp::Add.into(),
                             vec![
                                 Aexp::Var("a".to_string()),
                                 Aexp::Var("b".to_string()),
@@ -462,8 +487,8 @@ mod tests {
                 params: vec!["x".to_string()],
                 body: letvar(
                     "cond",
-                    Cexp::ApplyPrimitive(
-                        PrimOp::Equal,
+                    Cexp::Apply(
+                        PrimOp::Equal.into(),
                         vec![Aexp::Var("x".to_string()), Aexp::Integer(0)],
                     ),
                     Cexp::If(
@@ -480,8 +505,8 @@ mod tests {
                 letvar(
                     "b",
                     Cexp::ApplyStatic("is_zero".to_string(), vec![Aexp::Integer(1)]),
-                    Cexp::ApplyPrimitive(
-                        PrimOp::Add,
+                    Cexp::Apply(
+                        PrimOp::Add.into(),
                         vec![Aexp::Var("a".to_string()), Aexp::Var("b".to_string())],
                     )
                     .into(),

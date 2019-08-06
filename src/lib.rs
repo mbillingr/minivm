@@ -3,6 +3,7 @@ pub mod ssa_builder;
 
 pub mod assembler;
 pub mod bytecode_builder;
+pub mod closure_lang;
 pub mod core_compiler;
 pub mod core_cps_compiler;
 pub mod fixlang;
