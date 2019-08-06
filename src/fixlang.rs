@@ -29,7 +29,7 @@ pub enum Aexp {
 pub struct FunctionDefinition {
     pub name: String,
     pub params: Vec<String>,
-    pub body: Expr,
+    pub body: Box<Expr>,
 }
 
 /// Transform a fixlang Expression into a top-level nolambda Program.
@@ -53,7 +53,7 @@ impl Context {
         top_funcs: &mut Vec<nolambda::FunctionDefinition>,
     ) -> nolambda::Expr {
         match expr {
-            Expr::Atomic(aexp) => nolambda::Expr::Atomic(self.aexp_to_nolambda(aexp)),
+            Expr::Atomic(aexp) => nolambda::Expr::Atomic(self.aexp_to_nolambda(aexp, top_funcs)),
             Expr::Complex(cexp) => nolambda::Expr::Complex(self.cexp_to_nolambda(cexp, top_funcs)),
             Expr::Begin(exprs) => nolambda::Expr::Begin(
                 exprs
@@ -68,24 +68,25 @@ impl Context {
             ),
             Expr::Fix(fndefs, body) => {
                 for fndef in fndefs {
-                    let body = self.lift_lambdas(&fndef.body, top_funcs);
-                    let nl_func = nolambda::FunctionDefinition {
-                        name: fndef.name.clone(),
-                        params: fndef.params.clone(),
-                        body,
-                    };
-                    top_funcs.push(nl_func);
-
-                    // todo: do we need this here, or can it be handled at the site of escape?
-                    /*if self.does_escape(fndef.name) {
-                        unimplemented!()
-                    } else {
-                        unimplemented!()
-                    }*/
+                    self.add_top_func(fndef, top_funcs);
                 }
                 self.lift_lambdas(body, top_funcs)
             }
         }
+    }
+
+    fn add_top_func(
+        &mut self,
+        fndef: &FunctionDefinition,
+        top_funcs: &mut Vec<nolambda::FunctionDefinition>,
+    ) {
+        let body = self.lift_lambdas(&fndef.body, top_funcs);
+        let nl_func = nolambda::FunctionDefinition {
+            name: fndef.name.clone(),
+            params: fndef.params.clone(),
+            body,
+        };
+        top_funcs.push(nl_func);
     }
 
     fn cexp_to_nolambda(
@@ -94,25 +95,32 @@ impl Context {
         top_funcs: &mut Vec<nolambda::FunctionDefinition>,
     ) -> nolambda::Cexp {
         match cexp {
-            Cexp::Atomic(aexp) => nolambda::Cexp::Atomic(self.aexp_to_nolambda(aexp)),
+            Cexp::Atomic(aexp) => nolambda::Cexp::Atomic(self.aexp_to_nolambda(aexp, top_funcs)),
             Cexp::Apply(func, args) => {
-                let nl_args = args.iter().map(|a| self.aexp_to_nolambda(a)).collect();
+                let nl_args = args
+                    .iter()
+                    .map(|a| self.aexp_to_nolambda(a, top_funcs))
+                    .collect();
                 if let Some(function) = self.as_known_function(func) {
                     nolambda::Cexp::ApplyStatic(function, nl_args)
                 } else {
-                    let nl_func = self.aexp_to_nolambda(func);
+                    let nl_func = self.aexp_to_nolambda(func, top_funcs);
                     nolambda::Cexp::Apply(nl_func, nl_args)
                 }
             }
             Cexp::If(cond, yes, no) => nolambda::Cexp::If(
-                self.aexp_to_nolambda(cond),
+                self.aexp_to_nolambda(cond, top_funcs),
                 Box::new(self.lift_lambdas(yes, top_funcs)),
                 Box::new(self.lift_lambdas(no, top_funcs)),
             ),
         }
     }
 
-    fn aexp_to_nolambda(&mut self, aexp: &Aexp) -> nolambda::Aexp {
+    fn aexp_to_nolambda(
+        &mut self,
+        aexp: &Aexp,
+        top_funcs: &mut Vec<nolambda::FunctionDefinition>,
+    ) -> nolambda::Aexp {
         match aexp {
             Aexp::Undefined => nolambda::Aexp::Undefined,
             Aexp::Integer(i) => nolambda::Aexp::Integer(*i),

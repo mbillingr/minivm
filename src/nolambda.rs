@@ -59,6 +59,7 @@ pub enum Aexp {
     Var(String),
     Function(String),
     PrimOp(PrimOp),
+    Closure(usize, Box<Aexp>),
 }
 
 impl From<PrimOp> for Aexp {
@@ -100,7 +101,7 @@ pub enum PrimOp {
 impl PrimOp {
     fn compile(&self, args: &[Var], block: &Block) -> Var {
         match self {
-            MakeRec => self.make_rec(args, block),
+            PrimOp::MakeRec => self.make_rec(args, block),
             _ => match args.len() {
                 0 => self.invariant(block),
                 1 => self.singular(&args[0], block),
@@ -288,6 +289,8 @@ impl FixCompiler {
                     } else {
                         (Some(primitive.compile(&args, block)), block.clone())
                     }
+                } else if let Aexp::Closure(offset, rec) = func {
+                    unimplemented!()
                 } else {
                     let ref_args: Vec<_> = args.iter().collect();
                     let func = self.compile_aexp(func, block).0.unwrap();
@@ -329,7 +332,8 @@ impl FixCompiler {
                 Aexp::Integer(i) => block.constant(*i),
                 Aexp::Var(var_name) => self.lookup(var_name, block).unwrap(),
                 Aexp::Function(func_name) => block.label(self.funcs.get(func_name).unwrap()),
-                Aexp::PrimOp(prim) => unimplemented!("TODO: Implement wrapper functions for primitive operations so they can be bound to variables")
+                Aexp::PrimOp(prim) => unimplemented!("TODO: Implement wrapper functions for primitive operations so they can be bound to variables"),
+                Aexp::Closure(_, _) => unimplemented!()
             }),
             block.clone(),
         )

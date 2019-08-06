@@ -241,6 +241,14 @@ impl<V: std::fmt::Debug> Block<V> {
         var
     }
 
+    pub fn get_rec(&self, rec: &Var<V>, idx: usize) -> Var<V> {
+        let var = self.new_var();
+        self.block
+            .borrow_mut()
+            .append_op(Op::GetRec(var.name, rec.name, idx));
+        var
+    }
+
     pub fn equals(&self, a: &Var<V>, b: &Var<V>) -> Var<V> {
         let result = self.new_var();
         self.block
@@ -542,6 +550,7 @@ enum Op<V> {
     Div(VarName, VarName, VarName),
 
     GetCell(VarName, VarName),
+    GetRec(VarName, VarName, usize),
 
     Equal(VarName, VarName, VarName),
 
@@ -597,7 +606,7 @@ impl<V: std::fmt::Debug> Op<V> {
                     *c = new
                 }
             }
-            Op::Copy(a, b) | Op::GetCell(a, b) => {
+            Op::Copy(a, b) | Op::GetCell(a, b) | Op::GetRec(a, b, _) => {
                 if a == &old {
                     *a = new
                 }
@@ -657,7 +666,7 @@ impl<V: std::fmt::Debug> Op<V> {
                 assert!(assigned_vars.contains(b));
                 assigned_vars.insert(*z);
             }
-            Op::Copy(z, a) | Op::GetCell(z, a) => {
+            Op::Copy(z, a) | Op::GetCell(z, a) | Op::GetRec(z, a, _) => {
                 assert!(assigned_vars.contains(a));
                 assigned_vars.insert(*z);
             }
@@ -791,7 +800,7 @@ impl LivenessGraph {
                 //       which might actually have the same effect.)
                 self.preference_pairs.push((*a, *z));
             }
-            Op::GetCell(z, a) => {
+            Op::GetCell(z, a) | Op::GetRec(z, a, _) => {
                 self.liveset.remove(z);
                 self.liveset.insert(*a);
             }
@@ -1022,6 +1031,7 @@ impl Compiler {
             Op::Mul(z, a, b) => self.assembly.op(vm::Op::Mul(r!(z), r!(a), R(r!(b)))),
             Op::Div(z, a, b) => self.assembly.op(vm::Op::Div(r!(z), R(r!(a)), R(r!(b)))),
             Op::GetCell(z, a) => self.assembly.op(vm::Op::GetCell(r!(z), r!(a))),
+            Op::GetRec(z, a, idx) => self.assembly.op(vm::Op::GetRec(r!(z), r!(a), I(*idx))),
             Op::Equal(z, a, b) => self.assembly.op(vm::Op::Equal(r!(z), r!(a), R(r!(b)))),
             Op::Branch(blk, args) => {
                 for (a, p) in args.iter().zip(&blk.block.borrow().params) {
