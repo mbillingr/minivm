@@ -63,7 +63,22 @@ impl SchemeCompiler {
                 let callee = block.get_rec(&fv, 0);
                 block.call(&callee, &args.iter().collect::<Vec<_>>())
             }
-            Expr::Mul => block.constant(PrimitiveValue::Undefined),
+            Expr::Mul => {
+                let body_block = block.create_sibling();
+                let a = body_block.append_parameter();
+                let b = body_block.append_parameter();
+                let c = body_block.mul(&a, &b);
+                body_block.return_(&c);
+                let body_block = body_block.into_function();
+
+                let closure_record = block.make_rec(1);
+                let function = block.label(&body_block);
+                block.set_rec(&closure_record, 0, &function);
+
+                self.lambda_blocks.push(body_block);
+
+                closure_record
+            }
             _ => unimplemented!(),
         }
     }
