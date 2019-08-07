@@ -1,5 +1,6 @@
 use crate::assembler::Assembler;
 use crate::primitive_value::PrimitiveValue;
+use crate::uid::global_uid;
 use crate::virtual_machine as vm;
 use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -1171,8 +1172,7 @@ impl Compiler {
     }
 
     fn unique_label(&mut self, name: &str) -> String {
-        self.counter += 1;
-        format!("{}-{}", name, self.counter)
+        format!("{}-{}", name, global_uid())
     }
 }
 
@@ -1192,6 +1192,7 @@ pub fn link(compilers: &[Compiler]) -> (Vec<vm::Op>, HashMap<String, usize>) {
 mod tests {
     use super::*;
     use crate::memory::store_code_block;
+    use crate::primitive_value::CodePos;
     use crate::virtual_machine::eval;
 
     impl<V: std::fmt::Debug> PartialEq<Vec<Op<V>>> for Block<V> {
@@ -1680,7 +1681,7 @@ mod tests {
                 PrimitiveValue::Integer(18),
             ),
             vm::Op::LoadLabel(RETURN_TARGET_REGISTER as vm::Register, 2),
-            vm::Op::JmpFar(code),
+            vm::Op::JmpFar(CodePos::new(code, 0)),
             vm::Op::Copy(0, RETURN_VALUE_REGISTER as vm::Register),
             vm::Op::Term,
         ]);

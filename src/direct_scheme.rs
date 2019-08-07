@@ -104,6 +104,7 @@ fn free_vars(expr: &Expr) -> HashSet<&str> {
 mod tests {
     use super::*;
     use crate::memory::store_code_block;
+    use crate::primitive_value::CodePos;
 
     fn lambda(params: &[&str], body: Expr) -> Expr {
         Expr::Lambda(
@@ -169,7 +170,7 @@ mod tests {
             vm::Op::Alloc(ssa_builder::STACK_REGISTER, 100),
             vm::Op::Const(ssa_builder::STACK_POINTER_REGISTER, 0.into()),
             vm::Op::LoadLabel(ssa_builder::RETURN_TARGET_REGISTER, 2),
-            vm::Op::JmpFar(code),
+            vm::Op::JmpFar(CodePos::new(code, 0)),
             vm::Op::Copy(0, ssa_builder::RETURN_VALUE_REGISTER),
             vm::Op::Term,
         ]);

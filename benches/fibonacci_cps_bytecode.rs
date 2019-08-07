@@ -2,7 +2,7 @@ extern crate criterion;
 use criterion::black_box;
 use criterion::{criterion_group, criterion_main, Criterion};
 use minivm::memory::{store_code_block, RecordStorage};
-use minivm::primitive_value::PrimitiveValue;
+use minivm::primitive_value::{CodePos, PrimitiveValue};
 use minivm::virtual_machine::{run, Op, Operand};
 
 fn fibonacci(n: i64) -> &'static [Op] {
@@ -32,11 +32,15 @@ fn fibonacci(n: i64) -> &'static [Op] {
         // lambda (r1: f1, r2: [self-fn, n-1, k]
         Op::GetRec(3, 2, I(1)), // put n-1 in r3
         // re-use the closure record
-        Op::SetRec(2, I(0), I(PrimitiveValue::CodeBlock(lambda2))), // closure function
-        Op::SetRec(2, I(1), R(1)),                                  // replace n-1 with f1
-        Op::Copy(1, 3),                                             // put n-1 in r1
-        Op::Dec(1),                                                 // put n-2 in r1
-        Op::Jmp(R(5)),                                              // expect fib in r5
+        Op::SetRec(
+            2,
+            I(0),
+            I(PrimitiveValue::CodeBlock(CodePos::new(lambda2, 0))),
+        ), // closure function
+        Op::SetRec(2, I(1), R(1)), // replace n-1 with f1
+        Op::Copy(1, 3),            // put n-1 in r1
+        Op::Dec(1),                // put n-2 in r1
+        Op::Jmp(R(5)),             // expect fib in r5
     ]);
 
     let fib = store_code_block(vec![
@@ -48,23 +52,34 @@ fn fibonacci(n: i64) -> &'static [Op] {
         Op::GetRec(0, 2, I(0)), // put k's code in r0
         Op::Jmp(R(0)),          // call k with 1 in r1 and closure in r2
         // else
-        Op::Dec(1),                                                 // n -= 1
-        Op::Alloc(4, 3),                                            // allocate closure
-        Op::SetRec(4, I(0), I(PrimitiveValue::CodeBlock(lambda1))), // closure function
-        Op::SetRec(4, I(1), R(1)),                                  // n-1
-        Op::SetRec(4, I(2), R(2)),                                  // k
-        Op::Copy(2, 4), // put closure in r2 as the new continuation of the recursive call to fib
+        Op::Dec(1),      // n -= 1
+        Op::Alloc(4, 3), // allocate closure
+        Op::SetRec(
+            4,
+            I(0),
+            I(PrimitiveValue::CodeBlock(CodePos::new(lambda1, 0))),
+        ), // closure function
+        Op::SetRec(4, I(1), R(1)), // n-1
+        Op::SetRec(4, I(2), R(2)), // k
+        Op::Copy(2, 4),  // put closure in r2 as the new continuation of the recursive call to fib
         Op::Jmp(I(-11)), // call fib(n-1, lambda1)
     ]);
 
     let final_continuation = store_code_block(vec![Op::Copy(0, 1), Op::Term]);
 
     let code = store_code_block(vec![
-        Op::Const(1, PrimitiveValue::Integer(n)),     // initial n
-        Op::Const(5, PrimitiveValue::CodeBlock(fib)), // put fib in a register, so lambda1 can find it
-        Op::Alloc(2, 1),                              // allocate closure with no variables
-        Op::SetRec(2, I(0), I(PrimitiveValue::CodeBlock(final_continuation))), // put code in closure
-        Op::JmpFar(fib), // call fact(n=0, final_continuation)
+        Op::Const(1, PrimitiveValue::Integer(n)), // initial n
+        Op::Const(5, PrimitiveValue::CodeBlock(CodePos::new(fib, 0))), // put fib in a register, so lambda1 can find it
+        Op::Alloc(2, 1), // allocate closure with no variables
+        Op::SetRec(
+            2,
+            I(0),
+            I(PrimitiveValue::CodeBlock(CodePos::new(
+                final_continuation,
+                0,
+            ))),
+        ), // put code in closure
+        Op::JmpFar(CodePos::new(fib, 0)), // call fact(n=0, final_continuation)
     ]);
 
     code

@@ -354,6 +354,7 @@ impl FixCompiler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::primitive_value::CodePos;
     use crate::ssa_builder::{FIRST_ARG_REGISTER, RETURN_TARGET_REGISTER, RETURN_VALUE_REGISTER};
     use crate::virtual_machine::Operand::*;
 
@@ -388,7 +389,7 @@ mod tests {
             vm::Op::Alloc(ssa_builder::STACK_REGISTER, 100),
             vm::Op::Const(ssa_builder::STACK_POINTER_REGISTER, 0.into()),
             vm::Op::LoadLabel(ssa_builder::RETURN_TARGET_REGISTER, 2),
-            vm::Op::JmpFar(code),
+            vm::Op::JmpFar(CodePos::new(code, 0)),
             vm::Op::Copy(0, ssa_builder::RETURN_VALUE_REGISTER),
             vm::Op::Term,
         ]);
@@ -422,7 +423,7 @@ mod tests {
             vm::Op::Alloc(ssa_builder::STACK_REGISTER, 100),
             vm::Op::Const(ssa_builder::STACK_POINTER_REGISTER, 0.into()),
             vm::Op::LoadLabel(ssa_builder::RETURN_TARGET_REGISTER, 2),
-            vm::Op::JmpFar(code),
+            vm::Op::JmpFar(CodePos::new(code, 0)),
             vm::Op::Copy(0, ssa_builder::RETURN_VALUE_REGISTER),
             vm::Op::Term,
         ]);
@@ -437,7 +438,10 @@ mod tests {
             ),
             vm::Op::Jmp(R(RETURN_TARGET_REGISTER)),
         ]);
-        assert_eq!(vm::eval(main), PrimitiveValue::CodeBlock(expected));
+        assert_eq!(
+            vm::eval(main),
+            PrimitiveValue::CodeBlock(CodePos::new(expected, 0))
+        );
     }
 
     #[test]
@@ -474,7 +478,7 @@ mod tests {
             vm::Op::Alloc(ssa_builder::STACK_REGISTER, 100),
             vm::Op::Const(ssa_builder::STACK_POINTER_REGISTER, 0.into()),
             vm::Op::LoadLabel(ssa_builder::RETURN_TARGET_REGISTER, 2),
-            vm::Op::JmpFar(code),
+            vm::Op::JmpFar(CodePos::new(code, 0)),
             vm::Op::Copy(0, ssa_builder::RETURN_VALUE_REGISTER),
             vm::Op::Term,
         ]);
@@ -525,7 +529,7 @@ mod tests {
             vm::Op::Alloc(ssa_builder::STACK_REGISTER, 100),
             vm::Op::Const(ssa_builder::STACK_POINTER_REGISTER, 0.into()),
             vm::Op::LoadLabel(ssa_builder::RETURN_TARGET_REGISTER, 2),
-            vm::Op::JmpFar(code),
+            vm::Op::JmpFar(CodePos::new(code, 0)),
             vm::Op::Copy(0, ssa_builder::RETURN_VALUE_REGISTER),
             vm::Op::Term,
         ]);

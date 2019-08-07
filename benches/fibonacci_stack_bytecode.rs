@@ -2,7 +2,7 @@ extern crate criterion;
 use criterion::black_box;
 use criterion::{criterion_group, criterion_main, Criterion};
 use minivm::memory::{store_code_block, RecordStorage};
-use minivm::primitive_value::PrimitiveValue;
+use minivm::primitive_value::{CodePos, PrimitiveValue};
 use minivm::virtual_machine::{run, Op, Operand};
 
 fn fibonacci(n: i64) -> &'static [Op] {
@@ -40,7 +40,7 @@ fn fibonacci(n: i64) -> &'static [Op] {
         //push!(CONT),
         Op::SetRec(STACK, R(SP), R(CONT)),
         Op::Inc(SP),
-        Op::Const(CONT, PrimitiveValue::CodeBlock(after_fib2)),
+        Op::Const(CONT, PrimitiveValue::CodeBlock(CodePos::new(after_fib2, 0))),
         //push!(0),
         Op::SetRec(STACK, R(SP), R(0)),
         Op::Inc(SP),
@@ -62,7 +62,7 @@ fn fibonacci(n: i64) -> &'static [Op] {
         //push!(CONT),
         Op::SetRec(STACK, R(SP), R(CONT)),
         Op::Inc(SP),
-        Op::Const(CONT, PrimitiveValue::CodeBlock(after_fib1)),
+        Op::Const(CONT, PrimitiveValue::CodeBlock(CodePos::new(after_fib1, 0))),
         Op::Jmp(R(FIB)),
     ]);
 
@@ -71,10 +71,10 @@ fn fibonacci(n: i64) -> &'static [Op] {
     let code = store_code_block(vec![
         Op::Alloc(STACK, 1024),
         Op::Const(SP, PrimitiveValue::Integer(0)),
-        Op::Const(CONT, PrimitiveValue::CodeBlock(done)),
-        Op::Const(FIB, PrimitiveValue::CodeBlock(fib)), // put fib in a register
-        Op::Const(1, PrimitiveValue::Integer(n)),       // initial n
-        Op::JmpFar(fib),                                // call fact(n=0, final_continuation)
+        Op::Const(CONT, PrimitiveValue::CodeBlock(CodePos::new(done, 0))),
+        Op::Const(FIB, PrimitiveValue::CodeBlock(CodePos::new(fib, 0))), // put fib in a register
+        Op::Const(1, PrimitiveValue::Integer(n)),                        // initial n
+        Op::JmpFar(CodePos::new(fib, 0)), // call fact(n=0, final_continuation)
     ]);
 
     code

@@ -1,5 +1,5 @@
 use crate::memory::RecordStorage;
-use crate::primitive_value::PrimitiveValue;
+use crate::primitive_value::{CodePos, PrimitiveValue};
 
 const N_REGISTERS: usize = 8;
 
@@ -35,7 +35,7 @@ pub enum Op<T = isize> {
 
     // Branching
     Jmp(Operand<T>),
-    JmpFar(&'static [Op]),
+    JmpFar(CodePos),
     JmpCond(Operand<T>, Register),
     LoadLabel(Register, T),
 
@@ -83,6 +83,7 @@ pub fn run(mut code: &'static [Op], storage: &RecordStorage) -> PrimitiveValue {
     let mut register = [PrimitiveValue::Undefined; N_REGISTERS];
     let mut pc = 0;
     loop {
+        //dbg!(&code[pc]);
         match code[pc] {
             Op::Term => return register[0],
             Op::Nop => {}
@@ -109,8 +110,9 @@ pub fn run(mut code: &'static [Op], storage: &RecordStorage) -> PrimitiveValue {
             Op::Jmp(op) => {
                 match op {
                     Operand::R(r) => {
-                        code = register[r as usize].as_codeblock();
-                        pc = 0;
+                        let pos = register[r as usize].as_codeblock();
+                        code = pos.block;
+                        pc = pos.offset;
                     }
                     Operand::I(relative) => pc = (pc as isize + relative as isize) as usize,
                 }
@@ -120,22 +122,23 @@ pub fn run(mut code: &'static [Op], storage: &RecordStorage) -> PrimitiveValue {
                 if register[c as usize].as_bool() {
                     match op {
                         Operand::R(r) => {
-                            code = register[r as usize].as_codeblock();
-                            pc = 0;
+                            let pos = register[r as usize].as_codeblock();
+                            code = pos.block;
+                            pc = pos.offset;
                         }
                         Operand::I(relative) => pc = (pc as isize + relative) as usize,
                     }
                     continue;
                 }
             }
-            Op::JmpFar(target) => {
-                code = target;
-                pc = 0;
+            Op::JmpFar(CodePos { block, offset }) => {
+                code = block;
+                pc = offset;
                 continue;
             }
             Op::LoadLabel(r, offset) => {
                 register[r as usize] =
-                    PrimitiveValue::CodeBlock(&code[(pc as isize + offset) as usize..])
+                    PrimitiveValue::CodeBlock(CodePos::new(&code, (pc as isize + offset) as usize));
             }
             Op::Alloc(r, size) => {
                 let rec = storage.allocate_record(size, &mut register);
@@ -336,7 +339,7 @@ mod tests {
         let func = store_code_block(vec![Op::Inc(0), Op::Term]);
         let code = vec![
             Op::Const(0, PrimitiveValue::Integer(10)),
-            Op::JmpFar(func),
+            Op::JmpFar(CodePos::new(func, 0)),
             Op::Term,
         ];
 
@@ -352,7 +355,7 @@ mod tests {
         ]);
         let code = vec![
             Op::Const(0, PrimitiveValue::Integer(10)),
-            Op::Const(1, PrimitiveValue::CodeBlock(func)),
+            Op::Const(1, PrimitiveValue::CodeBlock(CodePos::new(func, 0))),
             Op::Jmp(R(1)),
             Op::Term,
         ];
@@ -515,7 +518,11 @@ mod tests {
             Op::Jmp(R(0)),          // call k with 1 in r1 and closure in r2
             // else
             Op::Alloc(4, 3), // allocate closure
-            Op::SetRec(4, I(0), I(PrimitiveValue::CodeBlock(accumulate))), // closure function
+            Op::SetRec(
+                4,
+                I(0),
+                I(PrimitiveValue::CodeBlock(CodePos::new(accumulate, 0))),
+            ), // closure function
             Op::SetRec(4, I(1), R(1)), // n
             Op::SetRec(4, I(2), R(2)), // k
             Op::Copy(2, 4), // put closure in r2 as the new continuation of the recursive call to fact
@@ -529,8 +536,15 @@ mod tests {
             vec![
                 Op::Const(1, PrimitiveValue::Integer(0)), // initial n
                 Op::Alloc(2, 1),                          // allocate closure with no variables
-                Op::SetRec(2, I(0), I(PrimitiveValue::CodeBlock(final_continuation))), // put code in closure
-                Op::JmpFar(fact), // call fact(n=0, final_continuation)
+                Op::SetRec(
+                    2,
+                    I(0),
+                    I(PrimitiveValue::CodeBlock(CodePos::new(
+                        final_continuation,
+                        0,
+                    ))),
+                ), // put code in closure
+                Op::JmpFar(CodePos::new(fact, 0)),        // call fact(n=0, final_continuation)
             ],
             1,
         );
@@ -540,8 +554,15 @@ mod tests {
                 // fact(1, final_continuation)
                 Op::Const(1, PrimitiveValue::Integer(1)),
                 Op::Alloc(2, 1),
-                Op::SetRec(2, I(0), I(PrimitiveValue::CodeBlock(final_continuation))),
-                Op::JmpFar(fact),
+                Op::SetRec(
+                    2,
+                    I(0),
+                    I(PrimitiveValue::CodeBlock(CodePos::new(
+                        final_continuation,
+                        0,
+                    ))),
+                ),
+                Op::JmpFar(CodePos::new(fact, 0)),
             ],
             1,
         );
@@ -551,8 +572,15 @@ mod tests {
                 // fact(2, final_continuation)
                 Op::Const(1, PrimitiveValue::Integer(2)),
                 Op::Alloc(2, 1),
-                Op::SetRec(2, I(0), I(PrimitiveValue::CodeBlock(final_continuation))),
-                Op::JmpFar(fact),
+                Op::SetRec(
+                    2,
+                    I(0),
+                    I(PrimitiveValue::CodeBlock(CodePos::new(
+                        final_continuation,
+                        0,
+                    ))),
+                ),
+                Op::JmpFar(CodePos::new(fact, 0)),
             ],
             2,
         );
@@ -562,8 +590,15 @@ mod tests {
                 // fact(3, final_continuation)
                 Op::Const(1, PrimitiveValue::Integer(3)),
                 Op::Alloc(2, 1),
-                Op::SetRec(2, I(0), I(PrimitiveValue::CodeBlock(final_continuation))),
-                Op::JmpFar(fact),
+                Op::SetRec(
+                    2,
+                    I(0),
+                    I(PrimitiveValue::CodeBlock(CodePos::new(
+                        final_continuation,
+                        0,
+                    ))),
+                ),
+                Op::JmpFar(CodePos::new(fact, 0)),
             ],
             6,
         );
@@ -573,8 +608,15 @@ mod tests {
                 // fact(5, final_continuation)
                 Op::Const(1, PrimitiveValue::Integer(5)),
                 Op::Alloc(2, 1),
-                Op::SetRec(2, I(0), I(PrimitiveValue::CodeBlock(final_continuation))),
-                Op::JmpFar(fact),
+                Op::SetRec(
+                    2,
+                    I(0),
+                    I(PrimitiveValue::CodeBlock(CodePos::new(
+                        final_continuation,
+                        0,
+                    ))),
+                ),
+                Op::JmpFar(CodePos::new(fact, 0)),
             ],
             120,
         );
@@ -584,8 +626,15 @@ mod tests {
                 // fact(10, final_continuation)
                 Op::Const(1, PrimitiveValue::Integer(10)),
                 Op::Alloc(2, 1),
-                Op::SetRec(2, I(0), I(PrimitiveValue::CodeBlock(final_continuation))),
-                Op::JmpFar(fact),
+                Op::SetRec(
+                    2,
+                    I(0),
+                    I(PrimitiveValue::CodeBlock(CodePos::new(
+                        final_continuation,
+                        0,
+                    ))),
+                ),
+                Op::JmpFar(CodePos::new(fact, 0)),
             ],
             3628800,
         );
@@ -619,10 +668,14 @@ mod tests {
             // lambda (r1: f1, r2: [self-fn, n-1, k]
             Op::GetRec(3, 2, I(1)), // put n-1 in r3
             // re-use the closure record
-            Op::SetRec(2, I(0), I(PrimitiveValue::CodeBlock(lambda2))), // closure function
-            Op::SetRec(2, I(1), R(1)),                                  // replace n-1 with f1
-            Op::Copy(1, 3),                                             // put n-1 in r1
-            Op::Dec(1),                                                 // put n-2 in r1
+            Op::SetRec(
+                2,
+                I(0),
+                I(PrimitiveValue::CodeBlock(CodePos::new(lambda2, 0))),
+            ), // closure function
+            Op::SetRec(2, I(1), R(1)), // replace n-1 with f1
+            Op::Copy(1, 3),            // put n-1 in r1
+            Op::Dec(1),                // put n-2 in r1
             Op::Jmp(R(5)),
         ]);
 
@@ -635,11 +688,15 @@ mod tests {
             Op::GetRec(0, 2, I(0)), // put k's code in r0
             Op::Jmp(R(0)),          // call k with 1 in r1 and closure in r2
             // else
-            Op::Dec(1),                                                 // n -= 1
-            Op::Alloc(4, 3),                                            // allocate closure
-            Op::SetRec(4, I(0), I(PrimitiveValue::CodeBlock(lambda1))), // closure function
-            Op::SetRec(4, I(1), R(1)),                                  // n-1
-            Op::SetRec(4, I(2), R(2)),                                  // k
+            Op::Dec(1),      // n -= 1
+            Op::Alloc(4, 3), // allocate closure
+            Op::SetRec(
+                4,
+                I(0),
+                I(PrimitiveValue::CodeBlock(CodePos::new(lambda1, 0))),
+            ), // closure function
+            Op::SetRec(4, I(1), R(1)), // n-1
+            Op::SetRec(4, I(2), R(2)), // k
             Op::Copy(2, 4), // put closure in r2 as the new continuation of the recursive call to fib
             Op::Jmp(I(-11)), // call fib(n-1, lambda1)
         ]);
@@ -649,11 +706,18 @@ mod tests {
         let test_fib = |n: i64, expect: i64| {
             run_vm_test(
                 vec![
-                    Op::Const(1, PrimitiveValue::Integer(n)),     // initial n
-                    Op::Const(5, PrimitiveValue::CodeBlock(fib)), // put fib in a register, so lambda1 can find it
+                    Op::Const(1, PrimitiveValue::Integer(n)), // initial n
+                    Op::Const(5, PrimitiveValue::CodeBlock(CodePos::new(fib, 0))), // put fib in a register, so lambda1 can find it
                     Op::Alloc(2, 1), // allocate closure with no variables
-                    Op::SetRec(2, I(0), I(PrimitiveValue::CodeBlock(final_continuation))), // put code in closure
-                    Op::JmpFar(fib), // call fact(n=0, final_continuation)
+                    Op::SetRec(
+                        2,
+                        I(0),
+                        I(PrimitiveValue::CodeBlock(CodePos::new(
+                            final_continuation,
+                            0,
+                        ))),
+                    ), // put code in closure
+                    Op::JmpFar(CodePos::new(fib, 0)), // call fact(n=0, final_continuation)
                 ],
                 expect,
             );
@@ -704,7 +768,7 @@ mod tests {
             //push!(CONT),
             Op::SetRec(STACK, R(SP), R(CONT)),
             Op::Inc(SP),
-            Op::Const(CONT, PrimitiveValue::CodeBlock(after_fib2)),
+            Op::Const(CONT, PrimitiveValue::CodeBlock(CodePos::new(after_fib2, 0))),
             //push!(0),
             Op::SetRec(STACK, R(SP), R(0)),
             Op::Inc(SP),
@@ -726,7 +790,7 @@ mod tests {
             //push!(CONT),
             Op::SetRec(STACK, R(SP), R(CONT)),
             Op::Inc(SP),
-            Op::Const(CONT, PrimitiveValue::CodeBlock(after_fib1)),
+            Op::Const(CONT, PrimitiveValue::CodeBlock(CodePos::new(after_fib1, 0))),
             Op::Jmp(R(FIB)),
         ]);
 
@@ -737,10 +801,10 @@ mod tests {
                 vec![
                     Op::Alloc(STACK, 1024),
                     Op::Const(SP, PrimitiveValue::Integer(0)),
-                    Op::Const(CONT, PrimitiveValue::CodeBlock(done)),
-                    Op::Const(FIB, PrimitiveValue::CodeBlock(fib)), // put fib in a register
-                    Op::Const(1, PrimitiveValue::Integer(n)),       // initial n
-                    Op::JmpFar(fib), // call fact(n=0, final_continuation)
+                    Op::Const(CONT, PrimitiveValue::CodeBlock(CodePos::new(done, 0))),
+                    Op::Const(FIB, PrimitiveValue::CodeBlock(CodePos::new(fib, 0))), // put fib in a register
+                    Op::Const(1, PrimitiveValue::Integer(n)),                        // initial n
+                    Op::JmpFar(CodePos::new(fib, 0)), // call fact(n=0, final_continuation)
                 ],
                 expect,
             );

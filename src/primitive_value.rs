@@ -12,9 +12,15 @@ pub enum PrimitiveValue {
     Pair(Pair),
     Cell(Cell),
 
-    CodeBlock(&'static [Op]),
+    CodeBlock(CodePos),
 
     Relocated(usize),
+}
+
+#[derive(Copy, Clone, PartialEq)]
+pub struct CodePos {
+    pub block: &'static [Op],
+    pub offset: usize,
 }
 
 impl PrimitiveValue {
@@ -34,9 +40,9 @@ impl PrimitiveValue {
         }
     }
 
-    pub fn as_codeblock(&self) -> &'static [Op] {
+    pub fn as_codeblock(&self) -> CodePos {
         if let PrimitiveValue::CodeBlock(c) = self {
-            c
+            *c
         } else {
             panic!("Type Error: not code -- {:?}", self)
         }
@@ -103,7 +109,7 @@ impl PrimitiveValue {
             (Integer(a), Integer(b)) => a == b,
             (Record(r1), Record(r2)) => r1.start_idx == r2.start_idx && r1.len == r2.len,
             (Pair(a), Pair(b)) => a.start_idx == b.start_idx,
-            (CodeBlock(a), CodeBlock(b)) => a.as_ptr() == b.as_ptr(),
+            (CodeBlock(a), CodeBlock(b)) => a == b,
             (Relocated(_), _) | (_, Relocated(_)) => unreachable!(),
             _ => false,
         }
@@ -161,5 +167,29 @@ impl From<PrimitiveValue> for usize {
             PrimitiveValue::Integer(i) if i < 0 => panic!("Value error: expected positive integer"),
             _ => panic!("Type Error"),
         }
+    }
+}
+
+impl CodePos {
+    pub fn new(block: &'static [Op], offset: usize) -> Self {
+        CodePos { block, offset }
+    }
+}
+
+impl std::fmt::Debug for CodePos {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "[")?;
+        match self.offset {
+            0 => {}
+            1 => write!(f, "{:?}, ", self.block[0])?,
+            _ => write!(f, "... {:?}, ", self.block[self.offset - 1])?,
+        }
+        write!(f, "{:?}", self.block[self.offset])?;
+        match self.block.len() - self.offset {
+            0 => {}
+            1 => write!(f, ", {:?}", self.block[self.offset + 1])?,
+            _ => write!(f, ", {:?} ...", self.block[self.offset + 1])?,
+        }
+        write!(f, "]")
     }
 }

@@ -169,7 +169,7 @@ impl std::fmt::Display for Op<String> {
             Op::LessEq(r, a, b) => write!(f, "r{} := {} <= {}", r, a, b),
             Op::Not(r, a) => write!(f, "r{} := !{}", r, a),
             Op::Jmp(z) => write!(f, "JMP {}", z),
-            Op::JmpFar(code_slice) => write!(f, "JMP-FAR {:p}", *code_slice),
+            Op::JmpFar(code_slice) => write!(f, "JMP-FAR {:?}", code_slice),
             Op::JmpCond(z, r) => write!(f, "IF r{} JMP {}", r, z),
             Op::LoadLabel(r, z) => write!(f, "r{} := {}", r, z),
             Op::Alloc(r, n) => write!(f, "r{} := [_; {}]", r, n),
