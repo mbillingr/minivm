@@ -6,6 +6,7 @@ pub mod bytecode_builder;
 pub mod closure_lang;
 pub mod core_compiler;
 pub mod core_cps_compiler;
+pub mod direct_scheme;
 pub mod fixlang;
 pub mod memory;
 pub mod nolambda;

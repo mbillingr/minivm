@@ -22,7 +22,7 @@ impl PrimitiveValue {
         match self {
             PrimitiveValue::True => true,
             PrimitiveValue::False => false,
-            _ => panic!("Type Error: not a boolean {:?}", self),
+            _ => panic!("Type Error: not a boolean -- {:?}", self),
         }
     }
 
@@ -30,7 +30,7 @@ impl PrimitiveValue {
         if let PrimitiveValue::Integer(x) = self {
             *x
         } else {
-            panic!("Type Error: not an integer {:?}", self)
+            panic!("Type Error: not an integer -- {:?}", self)
         }
     }
 
@@ -38,14 +38,14 @@ impl PrimitiveValue {
         if let PrimitiveValue::CodeBlock(c) = self {
             c
         } else {
-            panic!("Type Error: not code {:?}", self)
+            panic!("Type Error: not code -- {:?}", self)
         }
     }
 
     pub fn as_record(&self) -> Record {
         match self.try_as_record() {
             Some(r) => r,
-            None => panic!("Type Error: not a record {:?}", self),
+            None => panic!("Type Error: not a record -- {:?}", self),
         }
     }
 

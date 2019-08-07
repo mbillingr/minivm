@@ -166,6 +166,10 @@ impl<V: std::fmt::Debug> Block<V> {
         self.unit.upgrade().new_block()
     }
 
+    pub fn into_function(self) -> Block<V> {
+        self.unit.upgrade().new_function(&self)
+    }
+
     pub fn append_parameter(&self) -> Var<V> {
         let var = self.new_var();
         self.block.borrow_mut().append_parameter(var.name);
@@ -183,6 +187,10 @@ impl<V: std::fmt::Debug> Block<V> {
             .iter()
             .map(|&name| Var::new(self.unit.clone(), self, name))
             .collect()
+    }
+
+    pub fn nop(&self) {
+        self.block.borrow_mut().append_op(Op::Nop);
     }
 
     pub fn constant(&self, c: impl Into<V>) -> Var<V> {
@@ -241,12 +249,24 @@ impl<V: std::fmt::Debug> Block<V> {
         var
     }
 
+    pub fn make_rec(&self, n: usize) -> Var<V> {
+        let var = self.new_var();
+        self.block.borrow_mut().append_op(Op::Alloc(var.name, n));
+        var
+    }
+
     pub fn get_rec(&self, rec: &Var<V>, idx: usize) -> Var<V> {
         let var = self.new_var();
         self.block
             .borrow_mut()
             .append_op(Op::GetRec(var.name, rec.name, idx));
         var
+    }
+
+    pub fn set_rec(&self, rec: &Var<V>, idx: usize, val: &Var<V>) {
+        self.block
+            .borrow_mut()
+            .append_op(Op::SetRec(rec.name, idx, val.name));
     }
 
     pub fn equals(&self, a: &Var<V>, b: &Var<V>) -> Var<V> {
@@ -543,14 +563,17 @@ impl VarName {
 
 #[derive(Debug)]
 enum Op<V> {
+    Nop,
     Const(VarName, V),
     Add(VarName, VarName, VarName),
     Sub(VarName, VarName, VarName),
     Mul(VarName, VarName, VarName),
     Div(VarName, VarName, VarName),
 
-    GetCell(VarName, VarName),
+    Alloc(VarName, usize),
     GetRec(VarName, VarName, usize),
+    SetRec(VarName, usize, VarName),
+    GetCell(VarName, VarName),
 
     Equal(VarName, VarName, VarName),
 
@@ -586,7 +609,8 @@ impl<V: std::fmt::Debug> Op<V> {
 
     fn replace_var(&mut self, old: VarName, new: VarName) {
         match self {
-            Op::Const(v, _) | Op::Return(v) | Op::Label(v, _) => {
+            Op::Nop => {}
+            Op::Const(v, _) | Op::Return(v) | Op::Label(v, _) | Op::Alloc(v, _) => {
                 if v == &old {
                     *v = new
                 }
@@ -606,7 +630,7 @@ impl<V: std::fmt::Debug> Op<V> {
                     *c = new
                 }
             }
-            Op::Copy(a, b) | Op::GetCell(a, b) | Op::GetRec(a, b, _) => {
+            Op::Copy(a, b) | Op::GetCell(a, b) | Op::GetRec(a, b, _) | Op::SetRec(a, _, b) => {
                 if a == &old {
                     *a = new
                 }
@@ -654,7 +678,8 @@ impl<V: std::fmt::Debug> Op<V> {
 
     fn verify(&self, assigned_vars: &mut HashSet<VarName>) {
         match self {
-            Op::Const(v, _) | Op::Label(v, _) => {
+            Op::Nop => {}
+            Op::Const(v, _) | Op::Label(v, _) | Op::Alloc(v, _) => {
                 assigned_vars.insert(*v);
             }
             Op::Add(z, a, b)
@@ -669,6 +694,10 @@ impl<V: std::fmt::Debug> Op<V> {
             Op::Copy(z, a) | Op::GetCell(z, a) | Op::GetRec(z, a, _) => {
                 assert!(assigned_vars.contains(a));
                 assigned_vars.insert(*z);
+            }
+            Op::SetRec(a, _, b) => {
+                assert!(assigned_vars.contains(a));
+                assert!(assigned_vars.contains(b));
             }
             Op::Return(a) => assert!(assigned_vars.contains(a)),
             Op::Branch(block, args) => {
@@ -779,7 +808,8 @@ impl LivenessGraph {
 
     fn update<V: std::fmt::Debug>(&mut self, op: &Op<V>) {
         match op {
-            Op::Const(z, _) | Op::Label(z, _) => {
+            Op::Nop => {}
+            Op::Const(z, _) | Op::Label(z, _) | Op::Alloc(z, _) => {
                 self.liveset.remove(z);
             }
             Op::Add(z, a, b)
@@ -803,6 +833,10 @@ impl LivenessGraph {
             Op::GetCell(z, a) | Op::GetRec(z, a, _) => {
                 self.liveset.remove(z);
                 self.liveset.insert(*a);
+            }
+            Op::SetRec(a, _, b) => {
+                self.liveset.insert(*a);
+                self.liveset.insert(*b);
             }
             Op::Return(a) => {
                 self.liveset.insert(*a);
@@ -992,6 +1026,10 @@ impl Compiler {
         }
     }
 
+    pub fn get_assembly(&self) -> &Assembler {
+        &self.assembly
+    }
+
     pub fn compile_named(&mut self, name: String, block: &Block<PrimitiveValue>) {
         assert!(!self.is_compiled(block));
         self.assembly.label(name);
@@ -1023,6 +1061,7 @@ impl Compiler {
         }
 
         match op {
+            Op::Nop => self.assembly.op(vm::Op::Nop),
             Op::Const(z, c) => self.assembly.op(vm::Op::Const(r!(z), *c)),
             Op::Copy(z, a) if r!(z) == r!(a) => {}
             Op::Copy(z, a) => self.assembly.op(vm::Op::Copy(r!(z), r!(a))),
@@ -1030,8 +1069,10 @@ impl Compiler {
             Op::Sub(z, a, b) => self.assembly.op(vm::Op::Sub(r!(z), r!(a), R(r!(b)))),
             Op::Mul(z, a, b) => self.assembly.op(vm::Op::Mul(r!(z), r!(a), R(r!(b)))),
             Op::Div(z, a, b) => self.assembly.op(vm::Op::Div(r!(z), R(r!(a)), R(r!(b)))),
+            Op::Alloc(z, n) => self.assembly.op(vm::Op::Alloc(r!(z), *n)),
             Op::GetCell(z, a) => self.assembly.op(vm::Op::GetCell(r!(z), r!(a))),
             Op::GetRec(z, a, idx) => self.assembly.op(vm::Op::GetRec(r!(z), r!(a), I(*idx))),
+            Op::SetRec(a, idx, b) => self.assembly.op(vm::Op::SetRec(r!(a), I(*idx), R(r!(b)))),
             Op::Equal(z, a, b) => self.assembly.op(vm::Op::Equal(r!(z), r!(a), R(r!(b)))),
             Op::Branch(blk, args) => {
                 for (a, p) in args.iter().zip(&blk.block.borrow().params) {
