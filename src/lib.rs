@@ -13,6 +13,7 @@ pub mod nolambda;
 pub mod primitive_value;
 pub mod scheme_parser;
 pub mod test_utils;
+pub mod uid;
 pub mod virtual_machine;
 
 #[cfg(test)]
