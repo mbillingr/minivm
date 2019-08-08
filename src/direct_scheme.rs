@@ -1,10 +1,9 @@
-use crate::fixlang::Aexp::PrimOp;
 use crate::memory::store_code_block;
 use crate::primitive_value::{CodePos, PrimitiveValue};
 use crate::scheme_parser::{parse_datum, Object, ObjectKind};
 use crate::ssa_builder;
 use crate::virtual_machine as vm;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 type Block = ssa_builder::Block<PrimitiveValue>;
 type Var = ssa_builder::Var<PrimitiveValue>;
@@ -42,44 +41,78 @@ fn eval(expr: &Expr) -> PrimitiveValue {
     ssa_builder::eval(code)
 }
 
+#[derive(Debug)]
 enum Expr {
-    Lambda(Vec<String>, Box<Expr>),
+    Lambda(Vec<String>, Vec<Expr>),
     Apply(Box<Expr>, Vec<Expr>),
 
     Int(i64),
-    Var(String),
+    Symbol(String),
     Mul,
 }
 
-impl Expr {
-    fn free_vars(&self) -> HashSet<&str> {
-        match self {
-            Expr::Mul => set![],
-            Expr::Int(_) => set![],
-            Expr::Var(v) => set![v.as_str()],
-            Expr::Apply(func, args) => {
-                let mut fvs = func.free_vars();
-                for a in args {
-                    fvs.extend(a.free_vars())
-                }
-                fvs
-            }
-            Expr::Lambda(params, body) => {
-                let mut fvs = body.free_vars();
-                for p in params {
-                    fvs.remove(p.as_str());
-                }
-                fvs
-            }
-        }
-    }
-}
+impl Expr {}
 
 impl From<Object<'_>> for Expr {
     fn from(obj: Object) -> Self {
         match obj.kind {
             ObjectKind::Exact(i) => Expr::Int(i),
-            _ => unimplemented!(),
+            ObjectKind::Symbol(s) => Expr::Symbol(s.to_string()),
+            ObjectKind::Pair(pair) => {
+                let (car, cdr) = pair.into_inner();
+                match car.kind {
+                    ObjectKind::Symbol("lambda") => {
+                        let (formals, body) = cdr.decons();
+                        Expr::Lambda(formals.into(), body.into())
+                    }
+                    _ => Expr::Apply(car.into(), cdr.into()),
+                }
+            }
+            _ => unimplemented!("{:?}", obj),
+        }
+    }
+}
+
+impl From<Object<'_>> for Box<Expr> {
+    fn from(obj: Object) -> Self {
+        Box::new(obj.into())
+    }
+}
+
+impl From<Object<'_>> for Vec<Expr> {
+    fn from(mut obj: Object) -> Self {
+        let mut v = vec![];
+        loop {
+            match obj.kind {
+                ObjectKind::Nil => return v,
+                ObjectKind::Pair(pair) => {
+                    let (car, cdr) = pair.into_inner();
+                    v.push(car.into());
+                    obj = cdr;
+                }
+                _ => panic!("Cannot convert improper list to Vec"),
+            }
+        }
+    }
+}
+
+impl From<Object<'_>> for Vec<String> {
+    fn from(mut obj: Object) -> Self {
+        let mut v = vec![];
+        loop {
+            match obj.kind {
+                ObjectKind::Nil => return v,
+                ObjectKind::Pair(pair) => {
+                    let (car, cdr) = pair.into_inner();
+                    if let ObjectKind::Symbol(s) = car.kind {
+                        v.push(s.to_string());
+                    } else {
+                        panic!("Expected list of symbols")
+                    }
+                    obj = cdr;
+                }
+                _ => panic!("Cannot convert improper list to Vec"),
+            }
         }
     }
 }
@@ -100,9 +133,17 @@ impl SchemeCompiler {
     fn compile_expr(&mut self, expr: &Expr, block: &Block) -> Var {
         match expr {
             Expr::Int(value) => block.constant(*value),
-            Expr::Var(name) => self.lookup(name),
+            Expr::Symbol(name) => {
+                if let Some(var) = self.lookup(name) {
+                    var
+                } else if let Some(p) = self.lookup_primitive(name) {
+                    self.compile_expr(&p, block)
+                } else {
+                    panic!("Unbound symbol: {}", name)
+                }
+            }
             Expr::Lambda(params, body) => {
-                self.build_lambda_body(body, &params, expr.free_vars(), &block)
+                self.build_lambda_body(body, &params, self.free_vars(expr), &block)
             }
             Expr::Apply(func, args) => {
                 let closure = self.compile_expr(func, block);
@@ -119,18 +160,33 @@ impl SchemeCompiler {
         }
     }
 
-    fn lookup(&self, name: &str) -> Var {
+    fn compile_sequence(&mut self, seq: &[Expr], block: &Block) -> Var {
+        let mut result = block.constant(PrimitiveValue::Undefined);
+        for expr in seq {
+            result = self.compile_expr(expr, &block);
+        }
+        result
+    }
+
+    fn lookup(&self, name: &str) -> Option<Var> {
         for (n, v) in self.env.iter().rev() {
             if n == name {
-                return v.clone();
+                return Some(v.clone());
             }
         }
-        panic!("Unbound variable: {}", name);
+        None
+    }
+
+    fn lookup_primitive(&self, name: &str) -> Option<Expr> {
+        match name {
+            "*" => Some(Expr::Mul),
+            _ => None,
+        }
     }
 
     fn build_lambda_body<'a>(
         &mut self,
-        body: &Expr,
+        body: &[Expr],
         params: &[String],
         free_vars: HashSet<&str>,
         block: &Block,
@@ -148,7 +204,7 @@ impl SchemeCompiler {
                 .push((var.to_string(), body_block.get_rec(&closure_param, i)));
         }
 
-        let func_result = self.compile_expr(body, &body_block);
+        let mut func_result = self.compile_sequence(body, &body_block);
         body_block.return_(&func_result);
 
         self.env.truncate(env_len_before_call);
@@ -186,9 +242,40 @@ impl SchemeCompiler {
         let function = block.label(body_block);
         block.set_rec(&closure_record, 0, &function);
         for (i, var) in (1..).zip(free_vars) {
-            block.set_rec(&closure_record, i, &self.lookup(var));
+            block.set_rec(&closure_record, i, &self.lookup(var).unwrap());
         }
         closure_record
+    }
+
+    fn free_vars<'a>(&self, expr: &'a Expr) -> HashSet<&'a str> {
+        match expr {
+            Expr::Mul => set![],
+            Expr::Int(_) => set![],
+            Expr::Symbol(v) if self.lookup_primitive(v).is_some() => set![],
+            Expr::Symbol(v) => set![v.as_str()],
+            Expr::Apply(func, args) => {
+                let mut fvs = self.free_vars(func);
+                for a in args {
+                    fvs.extend(self.free_vars(a))
+                }
+                fvs
+            }
+            Expr::Lambda(params, body) => {
+                let mut fvs = self.free_vars_in_sequence(body);
+                for p in params {
+                    fvs.remove(p.as_str());
+                }
+                fvs
+            }
+        }
+    }
+
+    fn free_vars_in_sequence<'a>(&self, seq: &'a [Expr]) -> HashSet<&'a str> {
+        let mut fvs = set![];
+        for expr in seq {
+            fvs.extend(self.free_vars(expr));
+        }
+        fvs
     }
 }
 
@@ -201,7 +288,7 @@ mod tests {
     fn lambda(params: &[&str], body: Expr) -> Expr {
         Expr::Lambda(
             params.iter().copied().map(str::to_string).collect(),
-            Box::new(body),
+            vec![body],
         )
     }
 
@@ -210,7 +297,7 @@ mod tests {
     }
 
     fn var(name: &str) -> Expr {
-        Expr::Var(name.to_string())
+        Expr::Symbol(name.to_string())
     }
 
     fn verbose_build(expr: &Expr) -> Vec<vm::Op<isize>> {
@@ -276,4 +363,56 @@ mod tests {
         let value = eval(&expr);
         assert_eq!(value, 42.into());
     }
+
+    #[test]
+    fn eval_primitive() {
+        let expr = read("*");
+        let value = eval(&expr);
+
+        if let PrimitiveValue::Record(r) = value {
+            assert_eq!(r.len, 1)
+        } else {
+            panic!("Expected a closure record")
+        }
+    }
+
+    #[test]
+    fn eval_primitive_application() {
+        let expr = read("(* 2 3)");
+        let value = eval(&expr);
+        assert_eq!(value, 6.into());
+    }
+
+    #[test]
+    fn eval_lambda() {
+        let expr = read("(lambda (x) (* x x))");
+        let value = eval(&expr);
+
+        if let PrimitiveValue::Record(r) = value {
+            assert_eq!(r.len, 1)
+        } else {
+            panic!("Expected a closure record")
+        }
+    }
+
+    #[test]
+    fn eval_lambda_application() {
+        let expr = read("((lambda (x) (* x x)) 5)");
+        let value = eval(&expr);
+        assert_eq!(value, 25.into());
+    }
+
+    #[test]
+    fn eval_lambda_returns_last_body_expression() {
+        let expr = read("((lambda () 1 2 3 4))");
+        let value = eval(&expr);
+        assert_eq!(value, 4.into());
+    }
+
+    /*#[test]
+    fn eval_quote() {
+        let expr = read("'(1 2 3)");
+        let value = eval(&expr);
+        assert_eq!(value, 42.into());
+    }*/
 }

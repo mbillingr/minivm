@@ -92,6 +92,13 @@ impl<'i> Object<'i> {
         }
     }
 
+    pub fn decons(self) -> (Self, Self) {
+        match self.kind {
+            ObjectKind::Pair(pair) => pair.into_inner(),
+            _ => panic!("Not a pair"),
+        }
+    }
+
     fn set_list_cdr(self, item: Object<'i>) -> Object<'i> {
         match self.kind {
             ObjectKind::Nil => item,
@@ -100,6 +107,13 @@ impl<'i> Object<'i> {
                 Object::cons(a, b.set_list_cdr(item), self.span)
             }
             _ => panic!("Not a list"),
+        }
+    }
+
+    pub fn is_nil(&self) -> bool {
+        match self.kind {
+            ObjectKind::Nil => true,
+            _ => false,
         }
     }
 }
