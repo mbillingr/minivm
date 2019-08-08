@@ -329,7 +329,8 @@ impl<V: std::fmt::Debug> Block<V> {
     }
 
     pub fn return_(&self, var: &Var<V>) {
-        self.block.borrow_mut().append_op(Op::Return(var.name));
+        let retvar = self.copy(var);
+        self.block.borrow_mut().append_op(Op::Return(retvar.name));
     }
 
     pub fn tail_call(&self, func: &Var<V>, args: &[&Var<V>]) {
@@ -1093,7 +1094,11 @@ impl Compiler {
 
         match op {
             Op::Nop => self.assembly.op(vm::Op::Nop),
-            Op::Const(z, c) => self.assembly.op(vm::Op::Const(r!(z), *c)),
+            Op::Const(z, c) => {
+                if is_assigned!(z) {
+                    self.assembly.op(vm::Op::Const(r!(z), *c))
+                }
+            }
             Op::Copy(z, a) => {
                 if is_assigned!(z) && r!(z) != r!(a) {
                     self.assembly.op(vm::Op::Copy(r!(z), r!(a)))
@@ -1609,6 +1614,33 @@ mod tests {
             VarName(6) => FIRST_ARG_REGISTER + 1,
             VarName(7) => FIRST_ARG_REGISTER + 2,
             VarName(8) => RETURN_VALUE_REGISTER]
+        );
+    }
+
+    #[test]
+    fn assign_registers_conflicts() {
+        let tu = TranslationUnit::<i64>::new();
+        let entry = tu.new_block();
+        let f = entry.append_parameter();
+        let x = entry.append_parameter();
+        let _ = entry.call(&f, &[&x]); // conflict 1: x goes into 1st argument slot
+        entry.return_(&x); // conflict 2: x goes into return value slot
+
+        tu.verify(&entry);
+
+        tu.preassign_function_arg_registers(&entry);
+
+        tu.allocate_registers(&entry);
+
+        assert_eq!(
+            tu.unit.borrow().register_assignment,
+            map![
+            f.name => FIRST_GENERAL_PURPOSE_REGISTER + 0,
+            x.name => FIRST_GENERAL_PURPOSE_REGISTER + 2,
+            VarName(2) => FIRST_GENERAL_PURPOSE_REGISTER + 0,
+            VarName(3) => FIRST_ARG_REGISTER + 0,
+            // VarName(4) is unused
+            VarName(5) => RETURN_VALUE_REGISTER]
         );
     }
 
