@@ -55,6 +55,6 @@ impl TestResult {
 pub fn run_vm_test(code: Vec<Op>, expect: impl Into<TestResult>) {
     let code = store_code_block(code);
     let storage = RecordStorage::new(0);
-    let result = run(code, &storage);
+    let result = run(code, &storage, vec![]);
     assert_eq!(TestResult::from_run(result, &storage), expect.into());
 }

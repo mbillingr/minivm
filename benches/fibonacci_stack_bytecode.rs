@@ -85,7 +85,7 @@ fn bench_fib(c: &mut Criterion) {
     let storage = RecordStorage::new(0);
 
     c.bench_function("fib_stack_bytecode 15", move |b| {
-        b.iter(|| run(black_box(code), &storage))
+        b.iter(|| run(black_box(code), &storage, vec![]))
     });
 }
 

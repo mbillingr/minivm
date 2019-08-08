@@ -1,11 +1,46 @@
 use crate::fixlang::Aexp::PrimOp;
-use crate::primitive_value::PrimitiveValue;
+use crate::memory::store_code_block;
+use crate::primitive_value::{CodePos, PrimitiveValue};
+use crate::scheme_parser::{parse_datum, Object, ObjectKind};
 use crate::ssa_builder;
 use crate::virtual_machine as vm;
 use std::collections::HashSet;
 
 type Block = ssa_builder::Block<PrimitiveValue>;
 type Var = ssa_builder::Var<PrimitiveValue>;
+
+fn read(source: &str) -> Expr {
+    parse_datum(source).unwrap().into()
+}
+
+fn eval(expr: &Expr) -> PrimitiveValue {
+    let mut tu = ssa_builder::TranslationUnit::new();
+    let block = tu.new_block();
+
+    let mut sc = SchemeCompiler::new();
+
+    let x = sc.compile_expr(&expr, &block);
+    block.return_(&x);
+
+    let xc = tu.compile_function(&block);
+    println!("{}", xc.get_assembly());
+
+    let mut funcs = vec![xc];
+
+    for bl in &sc.lambda_blocks {
+        let c = tu.compile_function(bl);
+        println!("{}", c.get_assembly());
+        funcs.push(c);
+    }
+
+    let (ops, labels) = ssa_builder::link(&funcs);
+
+    println!("{:?}", ops);
+    println!("{:?}", labels);
+
+    let code = CodePos::new(store_code_block(ops), 0);
+    ssa_builder::eval(code)
+}
 
 enum Expr {
     Lambda(Vec<String>, Box<Expr>),
@@ -14,6 +49,39 @@ enum Expr {
     Int(i64),
     Var(String),
     Mul,
+}
+
+impl Expr {
+    fn free_vars(&self) -> HashSet<&str> {
+        match self {
+            Expr::Mul => set![],
+            Expr::Int(_) => set![],
+            Expr::Var(v) => set![v.as_str()],
+            Expr::Apply(func, args) => {
+                let mut fvs = func.free_vars();
+                for a in args {
+                    fvs.extend(a.free_vars())
+                }
+                fvs
+            }
+            Expr::Lambda(params, body) => {
+                let mut fvs = body.free_vars();
+                for p in params {
+                    fvs.remove(p.as_str());
+                }
+                fvs
+            }
+        }
+    }
+}
+
+impl From<Object<'_>> for Expr {
+    fn from(obj: Object) -> Self {
+        match obj.kind {
+            ObjectKind::Exact(i) => Expr::Int(i),
+            _ => unimplemented!(),
+        }
+    }
 }
 
 struct SchemeCompiler {
@@ -34,7 +102,7 @@ impl SchemeCompiler {
             Expr::Int(value) => block.constant(*value),
             Expr::Var(name) => self.lookup(name),
             Expr::Lambda(params, body) => {
-                self.build_lambda_body(body, &params, free_vars(expr), &block)
+                self.build_lambda_body(body, &params, expr.free_vars(), &block)
             }
             Expr::Apply(func, args) => {
                 let closure = self.compile_expr(func, block);
@@ -124,28 +192,6 @@ impl SchemeCompiler {
     }
 }
 
-fn free_vars(expr: &Expr) -> HashSet<&str> {
-    match expr {
-        Expr::Mul => set![],
-        Expr::Int(_) => set![],
-        Expr::Var(v) => set![v.as_str()],
-        Expr::Apply(func, args) => {
-            let mut fvs = free_vars(func);
-            for a in args {
-                fvs.extend(free_vars(a))
-            }
-            fvs
-        }
-        Expr::Lambda(params, body) => {
-            let mut fvs = free_vars(body);
-            for p in params {
-                fvs.remove(p.as_str());
-            }
-            fvs
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,8 +267,13 @@ mod tests {
             vm::Op::Term,
         ]);
 
-        println!("{:?}", vm::eval(main));
+        assert_eq!(vm::eval(main), PrimitiveValue::Integer(20));
+    }
 
-        panic!()
+    #[test]
+    fn eval_int() {
+        let expr = read("42");
+        let value = eval(&expr);
+        assert_eq!(value, 42.into());
     }
 }

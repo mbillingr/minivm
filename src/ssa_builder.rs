@@ -1,5 +1,6 @@
 use crate::assembler::Assembler;
-use crate::primitive_value::PrimitiveValue;
+use crate::memory::RecordStorage;
+use crate::primitive_value::{CodePos, PrimitiveValue};
 use crate::uid::global_uid;
 use crate::virtual_machine as vm;
 use std::cell::RefCell;
@@ -39,6 +40,22 @@ macro_rules! map {
         map
     }};
 }
+
+pub fn eval(vm_code: CodePos) -> PrimitiveValue {
+    let func = PrimitiveValue::CodeBlock(vm_code);
+    let storage = RecordStorage::new(0);
+    vm::run(&SSA_MAIN, &storage, vec![func])
+}
+
+static SSA_MAIN: [vm::Op; 7] = [
+    vm::Op::Copy(FIRST_GENERAL_PURPOSE_REGISTER, 0),
+    vm::Op::Alloc(STACK_REGISTER, 100),
+    vm::Op::Const(STACK_POINTER_REGISTER, PrimitiveValue::Integer(0)),
+    vm::Op::LoadLabel(RETURN_TARGET_REGISTER, 2),
+    vm::Op::Jmp(vm::Operand::R(FIRST_GENERAL_PURPOSE_REGISTER)),
+    vm::Op::Copy(0, RETURN_VALUE_REGISTER),
+    vm::Op::Term,
+];
 
 #[derive(Debug, Clone)]
 pub struct TranslationUnit<V> {

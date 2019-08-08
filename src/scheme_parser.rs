@@ -36,7 +36,7 @@ impl<R> From<(ErrorKind<R>, Pair<'_, R>)> for Error<R> {
 
 #[derive(Debug)]
 pub struct Object<'i> {
-    kind: ObjectKind<'i>,
+    pub kind: ObjectKind<'i>,
     span: Span<'i>,
 }
 

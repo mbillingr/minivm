@@ -76,14 +76,22 @@ where
 
 pub fn eval(code: &'static [Op]) -> PrimitiveValue {
     let storage = RecordStorage::new(0);
-    run(code, &storage)
+    run(code, &storage, vec![])
 }
 
-pub fn run(mut code: &'static [Op], storage: &RecordStorage) -> PrimitiveValue {
+pub fn run(
+    mut code: &'static [Op],
+    storage: &RecordStorage,
+    initial_registers: Vec<PrimitiveValue>,
+) -> PrimitiveValue {
     let mut register = [PrimitiveValue::Undefined; N_REGISTERS];
+    for (reg, init) in register.iter_mut().zip(initial_registers) {
+        *reg = init
+    }
+
     let mut pc = 0;
     loop {
-        //dbg!(&code[pc]);
+        dbg!(&code[pc]);
         match code[pc] {
             Op::Term => return register[0],
             Op::Nop => {}
