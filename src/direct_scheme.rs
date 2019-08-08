@@ -41,7 +41,7 @@ fn eval(expr: &Expr) -> PrimitiveValue {
     ssa_builder::eval(code)
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 enum Expr {
     Lambda(Vec<String>, Vec<Expr>),
     Apply(Box<Expr>, Vec<Expr>),
@@ -117,6 +117,53 @@ impl From<Object<'_>> for Vec<String> {
     }
 }
 
+#[derive(Default)]
+struct PrimitivePropagation<'a> {
+    env: Vec<(&'a str, Expr)>,
+}
+
+impl<'a> PrimitivePropagation<'a> {
+    pub fn pass(expr: Expr) -> Expr {
+        let mut context = PrimitivePropagation::default();
+        context.recurse(expr)
+    }
+
+    fn recurse(&mut self, expr: Expr) -> Expr {
+        match expr {
+            Expr::Symbol(name) => {
+                if let Some(x) = self.lookup(&name) {
+                    unimplemented!()
+                } else if let Some(p) = self.lookup_primitive(&name) {
+                    p
+                } else {
+                    Expr::Symbol(name)
+                }
+            }
+            Expr::Apply(f, args) => Expr::Apply(
+                Box::new(self.recurse(*f)),
+                args.into_iter().map(|a| self.recurse(a)).collect(),
+            ),
+            _ => expr,
+        }
+    }
+
+    fn lookup(&self, name: &str) -> Option<&Expr> {
+        for (n, v) in self.env.iter().rev() {
+            if *n == name {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    fn lookup_primitive(&self, name: &str) -> Option<Expr> {
+        match name {
+            "*" => Some(Expr::Mul),
+            _ => None,
+        }
+    }
+}
+
 struct SchemeCompiler {
     lambda_blocks: Vec<Block>,
     env: Vec<(String, Var)>,
@@ -146,11 +193,21 @@ impl SchemeCompiler {
                 self.build_lambda_body(body, &params, self.free_vars(expr), &block)
             }
             Expr::Apply(func, args) => {
-                let closure = self.compile_expr(func, block);
-                let callee = block.get_rec(&closure, 0);
-                let mut compiled_args = vec![closure];
-                compiled_args.extend(args.iter().map(|a| self.compile_expr(a, block)));
-                block.call(&callee, &compiled_args.iter().collect::<Vec<_>>())
+                if self.is_primitive_procedure(func) {
+                    match **func {
+                        Expr::Mul => block.mul(
+                            &self.compile_expr(&args[0], block),
+                            &self.compile_expr(&args[1], block),
+                        ),
+                        _ => unreachable!(),
+                    }
+                } else {
+                    let closure = self.compile_expr(func, block);
+                    let callee = block.get_rec(&closure, 0);
+                    let mut compiled_args = vec![closure];
+                    compiled_args.extend(args.iter().map(|a| self.compile_expr(a, block)));
+                    block.call(&callee, &compiled_args.iter().collect::<Vec<_>>())
+                }
             }
             Expr::Mul => self.build_primitive_body(block, |blk| {
                 let a = blk.append_parameter();
@@ -166,6 +223,13 @@ impl SchemeCompiler {
             result = self.compile_expr(expr, &block);
         }
         result
+    }
+
+    fn is_primitive_procedure(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Mul => true,
+            _ => false,
+        }
     }
 
     fn lookup(&self, name: &str) -> Option<Var> {
@@ -407,6 +471,56 @@ mod tests {
         let expr = read("((lambda () 1 2 3 4))");
         let value = eval(&expr);
         assert_eq!(value, 4.into());
+    }
+
+    #[test]
+    fn optimized_primitive_application() {
+        use vm::Op::*;
+        use vm::Operand::*;
+        use Expr::*;
+        use PrimitiveValue::*;
+        let expr = read("(* 2 3)");
+        let expr = PrimitivePropagation::pass(expr);
+        assert_eq!(expr, apply(Expr::Mul, vec![Int(2), Int(3)]));
+        let code = verbose_build(&expr);
+        println!("{:?}", code);
+        match code.as_slice() {
+            [Const(a, Integer(2)), Const(b, Integer(3)), vm::Op::Mul(_, x, R(y)), _] => {
+                assert_eq!(a, x);
+                assert_eq!(b, y);
+            }
+            _ => panic!("Unexpected output code"),
+        }
+    }
+
+    #[test]
+    fn optimized_primitive_application_nested_context() {
+        use vm::Op::*;
+        use vm::Operand::*;
+        use Expr::*;
+        use PrimitiveValue::*;
+        let expr = read("(lambda (x) (* x 99))");
+        let expr = PrimitivePropagation::pass(expr);
+        assert_eq!(
+            expr,
+            lambda(&["x"], apply(Expr::Mul, vec![var("x"), Int(99)]))
+        );
+        let code = verbose_build(&expr);
+        println!("{:?}", code);
+        match code.as_slice() {
+            [Const(a, Integer(2)), Const(b, Integer(3)), vm::Op::Mul(_, x, R(y)), _] => {
+                assert_eq!(a, x);
+                assert_eq!(b, y);
+            }
+            _ => panic!("Unexpected output code"),
+        }
+    }
+
+    #[test]
+    fn primitive_propagation_obeys_lambda_bound_names() {
+        let expr = read("((lambda (*) *) 42)");
+        let value = eval(&expr);
+        assert_eq!(value, 42.into());
     }
 
     /*#[test]
