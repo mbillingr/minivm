@@ -801,7 +801,7 @@ impl LivenessGraph {
         }
 
         for p in &block_data.params {
-            subgraph.liveset.remove(p);
+            subgraph.remove_from_liveset(p);
         }
 
         subgraph
@@ -811,19 +811,19 @@ impl LivenessGraph {
         match op {
             Op::Nop => {}
             Op::Const(z, _) | Op::Label(z, _) | Op::Alloc(z, _) => {
-                self.liveset.remove(z);
+                self.remove_from_liveset(z);
             }
             Op::Add(z, a, b)
             | Op::Sub(z, a, b)
             | Op::Mul(z, a, b)
             | Op::Div(z, a, b)
             | Op::Equal(z, a, b) => {
-                self.liveset.remove(z);
+                self.remove_from_liveset(z);
                 self.liveset.insert(*a);
                 self.liveset.insert(*b);
             }
             Op::Copy(z, a) => {
-                self.liveset.remove(z);
+                self.remove_from_liveset(z);
                 self.liveset.insert(*a);
                 // The register allocator should prefer assignments that make copies redundant
                 // TODO: evaluate if making this explicit really has benefits
@@ -832,7 +832,7 @@ impl LivenessGraph {
                 self.preference_pairs.push((*a, *z));
             }
             Op::GetCell(z, a) | Op::GetRec(z, a, _) => {
-                self.liveset.remove(z);
+                self.remove_from_liveset(z);
                 self.liveset.insert(*a);
             }
             Op::SetRec(a, _, b) => {
@@ -866,11 +866,11 @@ impl LivenessGraph {
                 }*/
             }
             Op::Call(z, _, args) => {
-                self.liveset.remove(z);
+                self.remove_from_liveset(z);
                 self.liveset.extend(args);
             }
             Op::CallDynamic(z, func, args) => {
-                self.liveset.remove(z);
+                self.remove_from_liveset(z);
                 self.liveset.insert(*func);
                 self.liveset.extend(args);
             }
@@ -889,6 +889,10 @@ impl LivenessGraph {
                 .or_default()
                 .extend(self.liveset.iter().filter(|&b| a != b));
         }
+    }
+
+    fn remove_from_liveset(&mut self, var: &VarName) {
+        self.liveset.remove(var);
     }
 }
 
@@ -1057,24 +1061,68 @@ impl Compiler {
 
         macro_rules! r {
             ($var:expr) => {
-                *self.register_assignment.get($var).unwrap() as vm::Register
+                *self
+                    .register_assignment
+                    .get($var)
+                    .expect("unassigned register") as vm::Register
+            };
+        }
+
+        macro_rules! is_assigned {
+            ($var:expr) => {
+                self.register_assignment.contains_key($var)
             };
         }
 
         match op {
             Op::Nop => self.assembly.op(vm::Op::Nop),
             Op::Const(z, c) => self.assembly.op(vm::Op::Const(r!(z), *c)),
-            Op::Copy(z, a) if r!(z) == r!(a) => {}
-            Op::Copy(z, a) => self.assembly.op(vm::Op::Copy(r!(z), r!(a))),
-            Op::Add(z, a, b) => self.assembly.op(vm::Op::Add(r!(z), r!(a), R(r!(b)))),
-            Op::Sub(z, a, b) => self.assembly.op(vm::Op::Sub(r!(z), r!(a), R(r!(b)))),
-            Op::Mul(z, a, b) => self.assembly.op(vm::Op::Mul(r!(z), r!(a), R(r!(b)))),
-            Op::Div(z, a, b) => self.assembly.op(vm::Op::Div(r!(z), R(r!(a)), R(r!(b)))),
-            Op::Alloc(z, n) => self.assembly.op(vm::Op::Alloc(r!(z), *n)),
-            Op::GetCell(z, a) => self.assembly.op(vm::Op::GetCell(r!(z), r!(a))),
-            Op::GetRec(z, a, idx) => self.assembly.op(vm::Op::GetRec(r!(z), r!(a), I(*idx))),
+            Op::Copy(z, a) => {
+                if is_assigned!(z) && r!(z) != r!(a) {
+                    self.assembly.op(vm::Op::Copy(r!(z), r!(a)))
+                }
+            }
+            Op::Add(z, a, b) => {
+                if is_assigned!(z) {
+                    self.assembly.op(vm::Op::Add(r!(z), r!(a), R(r!(b))))
+                }
+            }
+            Op::Sub(z, a, b) => {
+                if is_assigned!(z) {
+                    self.assembly.op(vm::Op::Sub(r!(z), r!(a), R(r!(b))))
+                }
+            }
+            Op::Mul(z, a, b) => {
+                if is_assigned!(z) {
+                    self.assembly.op(vm::Op::Mul(r!(z), r!(a), R(r!(b))))
+                }
+            }
+            Op::Div(z, a, b) => {
+                if is_assigned!(z) {
+                    self.assembly.op(vm::Op::Div(r!(z), R(r!(a)), R(r!(b))))
+                }
+            }
+            Op::Alloc(z, n) => {
+                if is_assigned!(z) {
+                    self.assembly.op(vm::Op::Alloc(r!(z), *n))
+                }
+            }
+            Op::GetCell(z, a) => {
+                if is_assigned!(z) {
+                    self.assembly.op(vm::Op::GetCell(r!(z), r!(a)))
+                }
+            }
+            Op::GetRec(z, a, idx) => {
+                if is_assigned!(z) {
+                    self.assembly.op(vm::Op::GetRec(r!(z), r!(a), I(*idx)))
+                }
+            }
             Op::SetRec(a, idx, b) => self.assembly.op(vm::Op::SetRec(r!(a), I(*idx), R(r!(b)))),
-            Op::Equal(z, a, b) => self.assembly.op(vm::Op::Equal(r!(z), r!(a), R(r!(b)))),
+            Op::Equal(z, a, b) => {
+                if is_assigned!(z) {
+                    self.assembly.op(vm::Op::Equal(r!(z), r!(a), R(r!(b))))
+                }
+            }
             Op::Branch(blk, args) => {
                 for (a, p) in args.iter().zip(&blk.block.borrow().params) {
                     self.compile_op(&Op::Copy(*p, *a));
@@ -1137,8 +1185,10 @@ impl Compiler {
                 self.assembly.op(vm::Op::Jmp(I(func)));
             }
             Op::Label(z, f) => {
-                let func = self.block_label(f);
-                self.assembly.op(vm::Op::LoadLabel(r!(z), func));
+                if is_assigned!(z) {
+                    let func = self.block_label(f);
+                    self.assembly.op(vm::Op::LoadLabel(r!(z), func));
+                }
             }
         }
     }
