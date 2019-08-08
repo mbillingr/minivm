@@ -1,7 +1,7 @@
 use crate::memory::RecordStorage;
 use crate::primitive_value::{CodePos, PrimitiveValue};
 
-const N_REGISTERS: usize = 8;
+const N_REGISTERS: usize = 32;
 
 pub type Register = u8;
 
@@ -91,7 +91,7 @@ pub fn run(
 
     let mut pc = 0;
     loop {
-        dbg!(&code[pc]);
+        //dbg!(&code[pc]);
         match code[pc] {
             Op::Term => return register[0],
             Op::Nop => {}
