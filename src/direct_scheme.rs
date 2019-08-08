@@ -32,65 +32,96 @@ impl SchemeCompiler {
     fn compile_expr(&mut self, expr: &Expr, block: &Block) -> Var {
         match expr {
             Expr::Int(value) => block.constant(*value),
-            Expr::Var(name) => lookup(name, &self.env),
+            Expr::Var(name) => self.lookup(name),
             Expr::Lambda(params, body) => {
-                let fvs = free_vars(expr);
-                let body_block = block.create_sibling();
-                for p in params {
-                    self.env.push((p.clone(), body_block.append_parameter()));
-                }
-
-                // todo: handle free variables
-
-                let func_result = self.compile_expr(body, &body_block);
-                body_block.return_(&func_result);
-                let body_block = body_block.into_function();
-
-                self.env.truncate(self.env.len() - params.len());
-
-                let closure_record = block.make_rec(1);
-                let function = block.label(&body_block);
-                block.set_rec(&closure_record, 0, &function);
-
-                self.lambda_blocks.push(body_block);
-
-                closure_record
+                self.build_lambda_body(body, &params, free_vars(expr), &block)
             }
             Expr::Apply(func, args) => {
-                // todo: handle free variables
-                let fv = self.compile_expr(func, block);
-                let args: Vec<_> = args.iter().map(|a| self.compile_expr(a, block)).collect();
-                let callee = block.get_rec(&fv, 0);
-                block.call(&callee, &args.iter().collect::<Vec<_>>())
+                let closure = self.compile_expr(func, block);
+                let callee = block.get_rec(&closure, 0);
+                let mut compiled_args = vec![closure];
+                compiled_args.extend(args.iter().map(|a| self.compile_expr(a, block)));
+                block.call(&callee, &compiled_args.iter().collect::<Vec<_>>())
             }
-            Expr::Mul => {
-                let body_block = block.create_sibling();
-                let a = body_block.append_parameter();
-                let b = body_block.append_parameter();
-                let c = body_block.mul(&a, &b);
-                body_block.return_(&c);
-                let body_block = body_block.into_function();
-
-                let closure_record = block.make_rec(1);
-                let function = block.label(&body_block);
-                block.set_rec(&closure_record, 0, &function);
-
-                self.lambda_blocks.push(body_block);
-
-                closure_record
-            }
-            _ => unimplemented!(),
+            Expr::Mul => self.build_primitive_body(block, |blk| {
+                let a = blk.append_parameter();
+                let b = blk.append_parameter();
+                blk.mul(&a, &b)
+            }),
         }
     }
-}
 
-fn lookup(name: &str, env: &[(String, Var)]) -> Var {
-    for (n, v) in env.iter().rev() {
-        if n == name {
-            return v.clone();
+    fn lookup(&self, name: &str) -> Var {
+        for (n, v) in self.env.iter().rev() {
+            if n == name {
+                return v.clone();
+            }
         }
+        panic!("Unbound variable: {}", name);
     }
-    panic!("Unbound variable: {}", name);
+
+    fn build_lambda_body<'a>(
+        &mut self,
+        body: &Expr,
+        params: &[String],
+        free_vars: HashSet<&str>,
+        block: &Block,
+    ) -> Var {
+        let env_len_before_call = self.env.len();
+        let body_block = block.create_sibling();
+        let closure_param = body_block.append_parameter();
+
+        for p in params {
+            self.env.push((p.clone(), body_block.append_parameter()));
+        }
+
+        for (i, var) in (1..).zip(&free_vars) {
+            self.env
+                .push((var.to_string(), body_block.get_rec(&closure_param, i)));
+        }
+
+        let func_result = self.compile_expr(body, &body_block);
+        body_block.return_(&func_result);
+
+        self.env.truncate(env_len_before_call);
+
+        let body_block = body_block.into_function();
+
+        let closure_record = self.build_closure_record(&body_block, free_vars, &block);
+        self.lambda_blocks.push(body_block);
+        closure_record
+    }
+
+    fn build_primitive_body(
+        &mut self,
+        block: &Block,
+        definition: impl FnOnce(&mut Block) -> Var,
+    ) -> Var {
+        let mut body_block = block.create_sibling();
+        let _closure_param = body_block.append_parameter();
+        let result = definition(&mut body_block);
+        body_block.return_(&result);
+        let body_block = body_block.into_function();
+
+        let closure_record = self.build_closure_record(&body_block, set![], &block);
+        self.lambda_blocks.push(body_block);
+        closure_record
+    }
+
+    fn build_closure_record(
+        &mut self,
+        body_block: &Block,
+        free_vars: HashSet<&str>,
+        block: &Block,
+    ) -> Var {
+        let closure_record = block.make_rec(1 + free_vars.len());
+        let function = block.label(body_block);
+        block.set_rec(&closure_record, 0, &function);
+        for (i, var) in (1..).zip(free_vars) {
+            block.set_rec(&closure_record, i, &self.lookup(var));
+        }
+        closure_record
+    }
 }
 
 fn free_vars(expr: &Expr) -> HashSet<&str> {
