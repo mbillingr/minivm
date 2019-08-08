@@ -119,7 +119,7 @@ impl From<Object<'_>> for Vec<String> {
 
 #[derive(Default)]
 struct PrimitivePropagation<'a> {
-    env: Vec<(&'a str, Expr)>,
+    env: Vec<&'a str>,
 }
 
 impl<'a> PrimitivePropagation<'a> {
@@ -130,9 +130,10 @@ impl<'a> PrimitivePropagation<'a> {
 
     fn recurse(&mut self, expr: Expr) -> Expr {
         match expr {
+            Expr::Int(i) => Expr::Int(i),
             Expr::Symbol(name) => {
-                if let Some(x) = self.lookup(&name) {
-                    unimplemented!()
+                if self.lookup(&name) {
+                    Expr::Symbol(name)
                 } else if let Some(p) = self.lookup_primitive(&name) {
                     p
                 } else {
@@ -143,17 +144,32 @@ impl<'a> PrimitivePropagation<'a> {
                 Box::new(self.recurse(*f)),
                 args.into_iter().map(|a| self.recurse(a)).collect(),
             ),
-            _ => expr,
+            Expr::Lambda(formals, mut body) => {
+                unsafe {
+                    // The borrow checker won't let us temporarily borrow formals in self.env.
+                    // Thus, we eradicate the lifetime by casting to a raw pointer and back.
+                    // This is only safe if all references to formals are removed again from env.
+                    self.env.extend(
+                        formals
+                            .iter()
+                            .map(String::as_str)
+                            .map(|s| s as *const _)
+                            .map(|s| std::mem::transmute::<_, &str>(s)),
+                    );
+                }
+                let body = body.into_iter().map(|x| self.recurse(x)).collect();
+
+                // remove formals borrowed above from env
+                self.env.truncate(self.env.len() - formals.len());
+                Expr::Lambda(formals, body)
+            }
+            Expr::Mul => Expr::Mul,
+            //_ => expr,
         }
     }
 
-    fn lookup(&self, name: &str) -> Option<&Expr> {
-        for (n, v) in self.env.iter().rev() {
-            if *n == name {
-                return Some(v);
-            }
-        }
-        None
+    fn lookup(&self, name: &str) -> bool {
+        self.env.contains(&name)
     }
 
     fn lookup_primitive(&self, name: &str) -> Option<Expr> {
@@ -495,25 +511,10 @@ mod tests {
 
     #[test]
     fn optimized_primitive_application_nested_context() {
-        use vm::Op::*;
-        use vm::Operand::*;
         use Expr::*;
-        use PrimitiveValue::*;
         let expr = read("(lambda (x) (* x 99))");
         let expr = PrimitivePropagation::pass(expr);
-        assert_eq!(
-            expr,
-            lambda(&["x"], apply(Expr::Mul, vec![var("x"), Int(99)]))
-        );
-        let code = verbose_build(&expr);
-        println!("{:?}", code);
-        match code.as_slice() {
-            [Const(a, Integer(2)), Const(b, Integer(3)), vm::Op::Mul(_, x, R(y)), _] => {
-                assert_eq!(a, x);
-                assert_eq!(b, y);
-            }
-            _ => panic!("Unexpected output code"),
-        }
+        assert_eq!(expr, lambda(&["x"], apply(Mul, vec![var("x"), Int(99)])));
     }
 
     #[test]
