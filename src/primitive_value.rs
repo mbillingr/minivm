@@ -1,7 +1,8 @@
 use crate::memory::{Cell, Pair, Record};
 use crate::virtual_machine::Op;
+use std::rc::Rc;
 
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum PrimitiveValue {
     Undefined,
     Nil,
@@ -12,7 +13,8 @@ pub enum PrimitiveValue {
     Pair(Pair),
     Cell(Cell),
 
-    CodeBlock(CodePos),
+    CodeBlock(Rc<Vec<Op>>),
+    CodePtr(usize, usize),
 
     Relocated(usize),
 }

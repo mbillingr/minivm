@@ -168,24 +168,32 @@ impl<'a> RecordStorage<'a> {
         }
 
         while scan_idx < to_space.len() {
-            if let Some(r) = to_space[scan_idx].try_as_record() {
-                let rec = self.get_record(r);
-                match rec[0] {
-                    PrimitiveValue::Relocated(l) => {
-                        to_space[scan_idx] = PrimitiveValue::Record(Record { start_idx: l, ..r })
-                    }
-                    _ => {
-                        let new_loc = to_space.len();
-                        to_space[scan_idx] = PrimitiveValue::Record(Record {
-                            start_idx: new_loc,
-                            ..r
-                        });
-                        let first = rec[0];
-                        unsafe {
-                            *(&rec[0] as *const _ as *mut _) = PrimitiveValue::Relocated(new_loc);
+            match &to_space[scan_idx] {
+                PrimitiveValue::CodeBlock(code) => unimplemented!(),
+                PrimitiveValue::CodePtr(target, _) => unimplemented!(),
+                other => {
+                    if let Some(r) = other.try_as_record() {
+                        let rec = self.get_record(r);
+                        match rec[0] {
+                            PrimitiveValue::Relocated(l) => {
+                                to_space[scan_idx] =
+                                    PrimitiveValue::Record(Record { start_idx: l, ..r })
+                            }
+                            _ => {
+                                let new_loc = to_space.len();
+                                to_space[scan_idx] = PrimitiveValue::Record(Record {
+                                    start_idx: new_loc,
+                                    ..r
+                                });
+                                let first = rec[0];
+                                unsafe {
+                                    *(&rec[0] as *const _ as *mut _) =
+                                        PrimitiveValue::Relocated(new_loc);
+                                }
+                                to_space.push(first);
+                                to_space.extend_from_slice(&rec[1..]);
+                            }
                         }
-                        to_space.push(first);
-                        to_space.extend_from_slice(&rec[1..]);
                     }
                 }
             }
