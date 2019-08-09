@@ -47,7 +47,7 @@ pub fn eval(vm_code: CodePos) -> PrimitiveValue {
     vm::run(&SSA_MAIN, &storage, vec![func])
 }
 
-static SSA_MAIN: [vm::Op; 7] = [
+pub static SSA_MAIN: [vm::Op; 7] = [
     vm::Op::Copy(FIRST_GENERAL_PURPOSE_REGISTER, 0),
     vm::Op::Alloc(STACK_REGISTER, 100),
     vm::Op::Const(STACK_POINTER_REGISTER, PrimitiveValue::Integer(0)),
@@ -285,6 +285,14 @@ impl<V: std::fmt::Debug> Block<V> {
         self.block
             .borrow_mut()
             .append_op(Op::SetRec(rec.name, idx, val.name));
+    }
+
+    pub fn cons(&self, car: &Var<V>, cdr: &Var<V>) -> Var<V> {
+        let var = self.new_var();
+        self.block
+            .borrow_mut()
+            .append_op(Op::Cons(var.name, car.name, cdr.name));
+        var
     }
 
     pub fn equals(&self, a: &Var<V>, b: &Var<V>) -> Var<V> {
@@ -592,6 +600,7 @@ enum Op<V> {
     Alloc(VarName, usize),
     GetRec(VarName, VarName, usize),
     SetRec(VarName, usize, VarName),
+    Cons(VarName, VarName, VarName),
     GetCell(VarName, VarName),
 
     Equal(VarName, VarName, VarName),
@@ -638,7 +647,8 @@ impl<V: std::fmt::Debug> Op<V> {
             | Op::Sub(a, b, c)
             | Op::Mul(a, b, c)
             | Op::Div(a, b, c)
-            | Op::Equal(a, b, c) => {
+            | Op::Equal(a, b, c)
+            | Op::Cons(a, b, c) => {
                 if a == &old {
                     *a = new
                 }
@@ -705,7 +715,8 @@ impl<V: std::fmt::Debug> Op<V> {
             | Op::Sub(z, a, b)
             | Op::Mul(z, a, b)
             | Op::Div(z, a, b)
-            | Op::Equal(z, a, b) => {
+            | Op::Equal(z, a, b)
+            | Op::Cons(z, a, b) => {
                 assert!(assigned_vars.contains(a));
                 assert!(assigned_vars.contains(b));
                 assigned_vars.insert(*z);
@@ -835,7 +846,8 @@ impl LivenessGraph {
             | Op::Sub(z, a, b)
             | Op::Mul(z, a, b)
             | Op::Div(z, a, b)
-            | Op::Equal(z, a, b) => {
+            | Op::Equal(z, a, b)
+            | Op::Cons(z, a, b) => {
                 self.remove_from_liveset(z);
                 self.liveset.insert(*a);
                 self.liveset.insert(*b);
@@ -1140,6 +1152,11 @@ impl Compiler {
                 }
             }
             Op::SetRec(a, idx, b) => self.assembly.op(vm::Op::SetRec(r!(a), I(*idx), R(r!(b)))),
+            Op::Cons(z, a, b) => {
+                if is_assigned!(z) {
+                    self.assembly.op(vm::Op::Cons(r!(z), R(r!(a)), R(r!(b))))
+                }
+            }
             Op::Equal(z, a, b) => {
                 if is_assigned!(z) {
                     self.assembly.op(vm::Op::Equal(r!(z), r!(a), R(r!(b))))

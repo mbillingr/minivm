@@ -1,4 +1,4 @@
-use crate::memory::store_code_block;
+use crate::memory::{store_code_block, RecordStorage};
 use crate::primitive_value::{CodePos, PrimitiveValue};
 use crate::scheme_parser::{parse_datum, Object, ObjectKind};
 use crate::ssa_builder;
@@ -12,7 +12,7 @@ fn read(source: &str) -> Expr {
     parse_datum(source).unwrap().into()
 }
 
-fn eval(expr: &Expr) -> PrimitiveValue {
+fn eval(expr: &Expr) -> SchemeValue {
     let mut tu = ssa_builder::TranslationUnit::new();
     let block = tu.new_block();
 
@@ -38,7 +38,12 @@ fn eval(expr: &Expr) -> PrimitiveValue {
     println!("{:?}", labels);
 
     let code = CodePos::new(store_code_block(ops), 0);
-    ssa_builder::eval(code)
+
+    let func = PrimitiveValue::CodeBlock(code);
+    let storage = RecordStorage::new(0);
+    let result = vm::run(&ssa_builder::SSA_MAIN, &storage, vec![func]);
+
+    SchemeValue::from_stored_primitive(result, &storage)
 }
 
 #[derive(Debug, PartialEq)]
@@ -48,7 +53,9 @@ enum Expr {
 
     Int(i64),
     Symbol(String),
+
     Mul,
+    Cons,
 }
 
 impl Expr {}
@@ -164,6 +171,7 @@ impl<'a> PrimitivePropagation<'a> {
                 Expr::Lambda(formals, body)
             }
             Expr::Mul => Expr::Mul,
+            Expr::Cons => Expr::Cons,
             //_ => expr,
         }
     }
@@ -230,6 +238,11 @@ impl SchemeCompiler {
                 let b = blk.append_parameter();
                 blk.mul(&a, &b)
             }),
+            Expr::Cons => self.build_primitive_body(block, |blk| {
+                let a = blk.append_parameter();
+                let b = blk.append_parameter();
+                blk.cons(&a, &b)
+            }),
         }
     }
 
@@ -260,6 +273,7 @@ impl SchemeCompiler {
     fn lookup_primitive(&self, name: &str) -> Option<Expr> {
         match name {
             "*" => Some(Expr::Mul),
+            "cons" => Some(Expr::Cons),
             _ => None,
         }
     }
@@ -329,7 +343,7 @@ impl SchemeCompiler {
 
     fn free_vars<'a>(&self, expr: &'a Expr) -> HashSet<&'a str> {
         match expr {
-            Expr::Mul => set![],
+            Expr::Mul | Expr::Cons => set![],
             Expr::Int(_) => set![],
             Expr::Symbol(v) if self.lookup_primitive(v).is_some() => set![],
             Expr::Symbol(v) => set![v.as_str()],
@@ -356,6 +370,60 @@ impl SchemeCompiler {
             fvs.extend(self.free_vars(expr));
         }
         fvs
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SchemeValue {
+    Undefined,
+    Nil,
+    True,
+    False,
+    Integer(i64),
+    Record(Vec<SchemeValue>),
+    Code(CodePos),
+}
+
+impl SchemeValue {
+    fn from_stored_primitive(p: PrimitiveValue, store: &RecordStorage) -> Self {
+        match p {
+            PrimitiveValue::Undefined => SchemeValue::Undefined,
+            PrimitiveValue::Nil => SchemeValue::Nil,
+            PrimitiveValue::True => SchemeValue::True,
+            PrimitiveValue::False => SchemeValue::False,
+            PrimitiveValue::Integer(i) => SchemeValue::Integer(i),
+            PrimitiveValue::Record(rec) => SchemeValue::Record(
+                store
+                    .get_record(rec)
+                    .iter()
+                    .map(|q| SchemeValue::from_stored_primitive(*q, store))
+                    .collect(),
+            ),
+            PrimitiveValue::Pair(p) => SchemeValue::Record(
+                store
+                    .get_record(p.into())
+                    .iter()
+                    .map(|q| SchemeValue::from_stored_primitive(*q, store))
+                    .collect(),
+            ),
+            PrimitiveValue::CodeBlock(code) => SchemeValue::Code(code),
+            _ => unimplemented!("{:?}", p),
+        }
+    }
+
+    fn is_procedure(&self) -> bool {
+        if let SchemeValue::Record(rec) = self {
+            if let Some(SchemeValue::Code(_)) = rec.first() {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+impl From<i64> for SchemeValue {
+    fn from(x: i64) -> SchemeValue {
+        SchemeValue::Integer(x)
     }
 }
 
@@ -448,31 +516,28 @@ mod tests {
     fn eval_primitive() {
         let expr = read("*");
         let value = eval(&expr);
-
-        if let PrimitiveValue::Record(r) = value {
-            assert_eq!(r.len, 1)
-        } else {
-            panic!("Expected a closure record")
-        }
+        assert!(value.is_procedure());
     }
 
     #[test]
-    fn eval_primitive_application() {
+    fn eval_primitive_multiply() {
         let expr = read("(* 2 3)");
         let value = eval(&expr);
         assert_eq!(value, 6.into());
     }
 
     #[test]
+    fn eval_primitive_cons() {
+        let expr = read("(cons 2 3)");
+        let value = eval(&expr);
+        assert_eq!(value, SchemeValue::Record(vec![2.into(), 3.into()]));
+    }
+
+    #[test]
     fn eval_lambda() {
         let expr = read("(lambda (x) (* x x))");
         let value = eval(&expr);
-
-        if let PrimitiveValue::Record(r) = value {
-            assert_eq!(r.len, 1)
-        } else {
-            panic!("Expected a closure record")
-        }
+        assert!(value.is_procedure());
     }
 
     #[test]
